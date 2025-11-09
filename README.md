@@ -9,7 +9,7 @@ This repository hosts a Streamlit app plus the underlying harvesting script used
 - Built-in artifact organization so each run bundles logs, configuration, chunked raw data, merged pickles, and metadata into a unique timestamped folder.
 
 ## Requirements
-- Python 3.11.x (the on-chain dependency `eth-defi` does not yet publish wheels for 3.12+).
+- Python 3.11.x (the on-chain dependency `web3-ethereum-defi` — imported as `eth_defi` — does not yet publish wheels for 3.12+).
 - Recommended: virtual environment (venv, Conda, etc.).
 - Install dependencies from `requirements.txt`.
 
@@ -48,7 +48,7 @@ pip install -r requirements.txt
    ```bash
    streamlit run streamlit_app.py
    ```
-2. Provide one or more HTTPS JSON-RPC URLs. Multiple endpoints improve reliability because the fetcher uses `eth-defi`'s multi-provider client.
+2. Provide one or more HTTPS JSON-RPC URLs. Multiple endpoints improve reliability because the fetcher uses `web3-ethereum-defi`'s multi-provider client.
 3. Pick a pool preset or input a custom pool address. Presets automatically surface known Uniswap v3 pools and token metadata.
 4. Choose the UTC start/end date and time. The app validates that the end time is after the start time.
 5. Select the columns to keep in the merged dataset. Selecting any gas column enables transaction receipt lookups (slower but richer data).
