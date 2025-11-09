@@ -213,3 +213,6 @@ __marimo__/
 
 # .Identifier files
 *.Identifier
+
+# notebooks
+*.ipynb
