@@ -6,7 +6,7 @@ pyarrow>=14.0,<16.0
 
 # On-chain + data engineering dependencies
 web3-ethereum-defi>=0.33,<0.35
-web3>=6.0,<7.0
+web3>=7.0,<8.0
 PyYAML>=6.0,<7.0
 tqdm>=4.66,<5.0
 
