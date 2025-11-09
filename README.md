@@ -21,6 +21,8 @@ You can set up the environment using either `venv` or Conda:
 <summary><strong>Using venv</strong></summary>
 
 ```bash
+git clone https://github.com/DanieleMDiNosse/Univ3_fetcher.git
+cd Univ3_fetcher
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -32,7 +34,9 @@ pip install -r requirements.txt
 <summary><strong>Using Conda</strong></summary>
 
 ```bash
-conda create -n univ3_fetcher python=3.10
+git clone https://github.com/DanieleMDiNosse/Univ3_fetcher.git
+cd Univ3_fetcher
+conda create -n univ3_fetcher python>=3.11
 conda activate univ3_fetcher
 pip install --upgrade pip
 pip install -r requirements.txt
