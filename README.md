@@ -9,7 +9,7 @@ This repository hosts a Streamlit app plus the underlying harvesting script used
 - Built-in artifact organization so each run bundles logs, configuration, chunked raw data, merged pickles, and metadata into a unique timestamped folder.
 
 ## Requirements
-- Python 3.10 or later.
+- Python 3.11.x (the on-chain dependency `eth-defi` does not yet publish wheels for 3.12+).
 - Recommended: virtual environment (venv, Conda, etc.).
 - Install dependencies from `requirements.txt`.
 
@@ -23,7 +23,7 @@ You can set up the environment using either `venv` or Conda:
 ```bash
 git clone https://github.com/DanieleMDiNosse/Univ3_fetcher.git
 cd Univ3_fetcher
-python3 -m venv .venv
+python3.11 -m venv .venv  # ensure Python 3.11 is available (pyenv works too)
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -36,7 +36,7 @@ pip install -r requirements.txt
 ```bash
 git clone https://github.com/DanieleMDiNosse/Univ3_fetcher.git
 cd Univ3_fetcher
-conda create -n univ3_fetcher python>=3.11
+conda create -n univ3_fetcher python=3.11
 conda activate univ3_fetcher
 pip install --upgrade pip
 pip install -r requirements.txt
