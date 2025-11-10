@@ -1,0 +1,26 @@
+pool_id: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+use_subgraph: true
+subgraph: https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV
+eth_rpc_url: https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588
+start_ts: 2023-01-01T00:00:00Z
+end_ts: 2023-01-10T23:59:59Z
+step_seconds: 450
+csv_ticks: ticks_over_time.csv
+csv_pools: pool_state_over_time.csv
+xlog: true
+price_min: null
+price_max: null
+max_ticks_per_snapshot: 100000
+anim_fps: 6
+out_gif: liquidity_profile.gif
+title_prefix: Uniswap v3 Liquidity vs Price
+graphql_delay_sec: 0.05
+out_dir: runs
+avg_block_time_sec: 12.0
+rpc_retries: 6
+rpc_backoff_base: 0.6
+concurrent_blocks: 6
+tick_pagination_page: 1000
+use_cursor_pagination: true
+tick_window: null
+save_liquidity_gross: false

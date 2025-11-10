@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "data_fetch_config.yml"
 
 DEFAULTS: Dict[str, object] = {
+    "graph_url": "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "json_rpc_urls": [
         "https://eth.llamarpc.com/sk_llama_252714c1e64c9873e3b21ff94d7f1a3f",
         "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588",
@@ -33,13 +34,22 @@ DEFAULTS: Dict[str, object] = {
     "chunk_size_blocks": 200,
     "parallel_workers": 8,
     "batch_receipt_size": 100,
+    "subgraph_page_size": 1000,
+    "chunk_events": 10000,
 }
 
 if DEFAULT_CONFIG_PATH.exists():
     try:
         with open(DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as fh:
             from_file = yaml.safe_load(fh) or {}
-        DEFAULTS.update({k: from_file.get(k, DEFAULTS[k]) for k in DEFAULTS})
+        # Update DEFAULTS with values from config file, preserving defaults for keys not in config
+        for k in DEFAULTS:
+            if k in from_file:
+                DEFAULTS[k] = from_file[k]
+        # Also add any additional keys from config file that aren't in DEFAULTS
+        for k, v in from_file.items():
+            if k not in DEFAULTS:
+                DEFAULTS[k] = v
     except Exception:
         pass
 
@@ -153,7 +163,7 @@ def execute_fetch(
     log_dir = config_path.parent.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "data_fetch.log"
-    command = [sys.executable, "data_fetch.py"]
+    command = [sys.executable, "data_fetch_subgraph.py"]
 
     env = os.environ.copy()
     env.update(keep_env)
@@ -201,11 +211,11 @@ def execute_fetch(
                     progress_bar.progress(int(last_pct))
     return_code = process.wait()
     if return_code != 0:
-        log_placeholder.error("data_fetch.py failed — check log output above.")
+        log_placeholder.error("data_fetch_subgraph.py failed — check log output above.")
         if progress_bar is not None:
             progress_bar.progress(int(last_pct))
     else:
-        log_placeholder.success("data_fetch.py finished successfully.")
+        log_placeholder.success("data_fetch_subgraph.py finished successfully.")
         if progress_bar is not None:
             progress_bar.progress(100)
     return return_code == 0, log_path
@@ -394,12 +404,14 @@ def render_hero_section():
         """
         <div class="hero-card">
             <div class="hero-card__eyebrow" style="font-size:1.15rem;">   Uniswap v3 data downloader</div>
-                Collect Swap/Mint/Burn events via the existing harvesting script and package the results.
-                Configure redundant RPC URLs, choose a pool and time window, then let the harvester
-                produce ready-to-analyze datasets complete with checkpoints, logs, and metadata.
+            <p>
+                Collect Swap/Mint/Burn events via subgraph-based harvesting and package the results.
+                Configure TheGraph subgraph endpoint and RPC URLs, choose a pool and time window, 
+                then let the harvester produce ready-to-analyze datasets complete with checkpoints, logs, and metadata.
+                Uses efficient GraphQL queries for event fetching with configurable pagination and batching.
             </p>
             <div class="hero-card__pills">
-                <span class="hero-card__pill">1 · Configure RPC endpoints</span>
+                <span class="hero-card__pill">1 · Configure subgraph & RPC</span>
                 <span class="hero-card__pill">2 · Select pool + timeframe</span>
                 <span class="hero-card__pill">3 · Export curated artifacts</span>
             </div>
@@ -505,17 +517,6 @@ def main():
     render_hero_section()
 
     with section_card(
-        "JSON-RPC endpoints",
-        "Combine multiple HTTPS RPC URLs for resiliency — failures are retried across providers.",
-        "🛰️",
-    ):
-        rpc_text = st.text_area(
-            "Paste one or more RPC URLs (one per line)",
-            value="\n".join(DEFAULTS["json_rpc_urls"]),
-            height=120,
-        )
-
-    with section_card(
         "Pool selection",
         "Use curated presets with token labels or paste any pool contract address.",
         "🧊",
@@ -597,10 +598,36 @@ def main():
         )
 
     with section_card(
-        "Advanced tuning",
-        "Optional knobs for power users. Defaults work well for most pools.",
-        "🧪",
+        "Data sources & advanced options",
+        "Configure RPC endpoints, subgraph URL, and fine-tune performance parameters.",
+        "⚙️",
     ):
+        rpc_text = st.text_area(
+            "JSON-RPC endpoints",
+            value="\n".join(DEFAULTS["json_rpc_urls"]),
+            height=100,
+            help="Combine multiple HTTPS RPC URLs for resiliency — failures are retried across providers.",
+        )
+        
+        graph_url = st.text_input(
+            "Subgraph endpoint",
+            value=str(DEFAULTS.get("graph_url", "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3")),
+            placeholder="https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
+            help="TheGraph subgraph URL for fetching Uniswap v3 events.",
+        )
+        
+        st.markdown("---")
+        st.markdown("**Advanced tuning**")
+        st.info(
+            """
+            **Performance parameters:** Adjust these to balance speed, memory usage, and API load.
+            - **Subgraph page size**: Events per GraphQL query (max 1000). Larger = fewer API calls, more memory.
+            - **Chunk events**: Events buffered before disk flush. Larger = fewer writes, more memory.
+            - **Batch receipt size**: Receipts fetched in parallel for gas data. Larger = faster, more RPC load.
+            - **Legacy options** (chunk size blocks, parallel workers): May be used by alternative fetchers.
+            """,
+            icon="ℹ️"
+        )
         col_adv1, col_adv2, col_adv3 = st.columns(3)
         with col_adv1:
             chunk_size = st.number_input(
@@ -608,7 +635,8 @@ def main():
                 min_value=50,
                 max_value=10_000,
                 step=50,
-                value=int(DEFAULTS["chunk_size_blocks"]),
+                value=int(DEFAULTS.get("chunk_size_blocks", 200)),
+                help="Max block span per log query before auto-splitting.",
             )
         with col_adv2:
             parallel_workers = st.number_input(
@@ -616,7 +644,8 @@ def main():
                 min_value=1,
                 max_value=64,
                 step=1,
-                value=int(DEFAULTS["parallel_workers"]),
+                value=int(DEFAULTS.get("parallel_workers", 8)),
+                help="Number of threads used for parsing chunks.",
             )
         with col_adv3:
             batch_receipt_size = st.number_input(
@@ -624,7 +653,28 @@ def main():
                 min_value=10,
                 max_value=500,
                 step=10,
-                value=int(DEFAULTS["batch_receipt_size"]),
+                value=int(DEFAULTS.get("batch_receipt_size", 100)),
+                help="Number of receipts/origins fetched per batch.",
+            )
+        
+        col_adv4, col_adv5 = st.columns(2)
+        with col_adv4:
+            subgraph_page_size = st.number_input(
+                "Subgraph page size",
+                min_value=1,
+                max_value=1000,
+                step=50,
+                value=int(DEFAULTS.get("subgraph_page_size", 1000)),
+                help="Number of events fetched per GraphQL query (max 1000).",
+            )
+        with col_adv5:
+            chunk_events = st.number_input(
+                "Chunk events (flush frequency)",
+                min_value=100,
+                max_value=100_000,
+                step=1000,
+                value=int(DEFAULTS.get("chunk_events", 10000)),
+                help="Number of events to buffer before flushing to disk.",
             )
         st.caption("Increase chunk size cautiously — overly large ranges are auto-split but may stress RPC providers.")
 
@@ -644,6 +694,12 @@ def main():
     errors: List[str] = []
     if not rpc_urls:
         errors.append("Provide at least one JSON-RPC URL.")
+    
+    # Validate graph_url
+    graph_url_clean = graph_url.strip() if graph_url else ""
+    if not graph_url_clean:
+        errors.append("Provide a valid Graph URL.")
+    
     try:
         pool_checksum = Web3.to_checksum_address(pool_addr_input.strip())
     except ValueError:
@@ -673,7 +729,9 @@ def main():
 
     skip_gas_data = not (set(selected_columns) & GAS_COLUMNS)
     compute_price_column = "price" in selected_columns
+    
     config_payload = {
+        "graph_url": graph_url_clean,
         "json_rpc_urls": rpc_urls,
         "pool_addr": pool_checksum,
         "start_ts": start_iso,
@@ -681,6 +739,8 @@ def main():
         "chunk_size_blocks": int(chunk_size),
         "parallel_workers": int(parallel_workers),
         "batch_receipt_size": int(batch_receipt_size),
+        "subgraph_page_size": int(subgraph_page_size),
+        "chunk_events": int(chunk_events),
         "checkpoint_path": str(checkpoint_path),
         "out_dir": str(runtime_out_dir),
         "skip_gas_data": skip_gas_data,
@@ -698,7 +758,7 @@ def main():
     render_log_output(log_placeholder, st.session_state.get(LOG_STATE_KEY, ""))
 
     if not success:
-        st.error("Run aborted because data_fetch.py exited with an error.")
+        st.error("Run aborted because data_fetch_subgraph.py exited with an error.")
         return
 
     try:
