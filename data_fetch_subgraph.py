@@ -288,6 +288,8 @@ class EventRow:
     gasUsed: Optional[int]
     gasPrice: Optional[int]
     effectiveGasPrice: Optional[int]
+    baseFeePerGas: Optional[int]
+    priorityFeePerGas: Optional[int]
     sender: Optional[str]
     owner: Optional[str]
     recipient: Optional[str]
@@ -419,6 +421,9 @@ def enrich_swaps_with_liquidity(rows: List[EventRow], receipts_cache: Dict[str, 
             pass
 
 def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> None:
+    print(f"[gas-meta] starting enrichment pass for {len(rows)} events") # remove this after the check
+    block_base_fee_cache: Dict[int, Optional[int]] = {}
+    processed_events = 0 # remove this after the check
     for r in rows:
         rc = receipts_cache.get(r.transactionHash)
         if not rc:
@@ -428,9 +433,42 @@ def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> Non
         except Exception:
             pass
         try:
-            r.effectiveGasPrice = int(rc.get("effectiveGasPrice")) if rc.get("effectiveGasPrice") is not None else None
+            eff_gp = rc.get("effectiveGasPrice")
+            r.effectiveGasPrice = int(eff_gp) if eff_gp is not None else r.effectiveGasPrice
         except Exception:
             pass
+        block_number: Optional[int] = None
+        try:
+            bn = rc.get("blockNumber")
+            if bn is None:
+                bn = r.blockNumber
+            if bn is not None:
+                block_number = int(bn)
+        except Exception:
+            block_number = None
+
+        base_fee_val: Optional[int] = None
+        if block_number is not None:
+            if block_number in block_base_fee_cache:
+                base_fee_val = block_base_fee_cache[block_number]
+            else:
+                try:
+                    block_obj = w3.eth.get_block(block_number)
+                    base_fee_raw = None
+                    if isinstance(block_obj, dict):
+                        base_fee_raw = block_obj.get("baseFeePerGas")
+                    else:
+                        base_fee_raw = getattr(block_obj, "baseFeePerGas", None)
+                    base_fee_val = int(base_fee_raw) if base_fee_raw is not None else None
+                except Exception:
+                    base_fee_val = None
+                    print(f"[gas-meta] failed to fetch base fee for block {block_number}") # remove this after the check
+                block_base_fee_cache[block_number] = base_fee_val
+                if base_fee_val is not None and (len(block_base_fee_cache) % 50 == 0): # remove this after the check
+                    print(f"[gas-meta] fetched base fee for {len(block_base_fee_cache)} unique blocks (latest={block_number})") # remove this after the check
+
+        r.baseFeePerGas = base_fee_val
+
         if r.gasPrice is None:
             try:
                 tx = w3.eth.get_transaction(r.transactionHash)
@@ -438,6 +476,29 @@ def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> Non
                     r.gasPrice = int(tx["gasPrice"])
             except Exception:
                 pass
+
+        priority_fee_val: Optional[int] = None
+        if r.effectiveGasPrice is not None:
+            try:
+                eff_gp_int = int(r.effectiveGasPrice)
+                if base_fee_val is not None:
+                    priority_fee_val = max(eff_gp_int - int(base_fee_val), 0)
+                else:
+                    priority_fee_val = eff_gp_int
+            except Exception:
+                priority_fee_val = None
+        elif r.gasPrice is not None:
+            try:
+                priority_fee_val = int(r.gasPrice)
+                r.effectiveGasPrice = int(r.gasPrice)
+            except Exception:
+                priority_fee_val = None
+
+        r.priorityFeePerGas = priority_fee_val
+        processed_events += 1
+        if processed_events % 250 == 0:
+            print(f"[gas-meta] processed {processed_events} events so far")
+    print(f"[gas-meta] enrichment pass complete — processed {processed_events} events, cached {len(block_base_fee_cache)} blocks")
 
 
 # ---------------- Utility ----------------
@@ -828,6 +889,7 @@ for etype, ev in stream_iter:
         row = EventRow(
             eventType=direction, blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
             origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+            baseFeePerGas=None, priorityFeePerGas=None,
             sender=ev.get("sender"), owner=None, recipient=ev.get("recipient"),
             amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
             sqrtPriceX96_event=int(ev["sqrtPriceX96"]), tick_event=int(ev["tick"]), liquidityAfter_event=None,
@@ -837,6 +899,7 @@ for etype, ev in stream_iter:
         row = EventRow(
             eventType="Mint", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
             origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+            baseFeePerGas=None, priorityFeePerGas=None,
             sender=ev.get("sender"), owner=ev.get("owner"), recipient=None,
             amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
             sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,
@@ -846,6 +909,7 @@ for etype, ev in stream_iter:
         row = EventRow(
             eventType="Burn", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
             origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+            baseFeePerGas=None, priorityFeePerGas=None,
             sender=None, owner=ev.get("owner"), recipient=None,
             amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
             sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,

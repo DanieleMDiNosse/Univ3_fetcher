@@ -117,6 +117,8 @@ ALL_COLUMNS: Sequence[str] = [
     "gasUsed",
     "gasPrice",
     "effectiveGasPrice",
+    "baseFeePerGas",
+    "priorityFeePerGas",
     "L_before",
     "sqrt_before",
     "tick_before",
@@ -141,7 +143,7 @@ DEFAULT_COLUMN_SELECTION: Sequence[str] = [
     "amount1",
     "price",
 ]
-GAS_COLUMNS = {"gasUsed", "gasPrice", "effectiveGasPrice"}
+GAS_COLUMNS = {"gasUsed", "gasPrice", "effectiveGasPrice", "baseFeePerGas", "priorityFeePerGas"}
 
 LOG_STATE_KEY = "last_run_log_text"
 
@@ -506,11 +508,8 @@ def prepare_preview_dataframe(df: pd.DataFrame, max_rows: int = 200) -> pd.DataF
     return preview.applymap(normalize)
 
 
-def main():
-    st.set_page_config(page_title="Uniswap v3 Downloader", layout="centered")
-    apply_layout_styles()
-    # st.title("Uniswap v3 data downloader")
-
+def render_data_fetcher_tab():
+    """Render the data fetcher tab (original functionality)."""
     default_start = parse_default_timestamp(DEFAULTS["start_ts"], datetime.now(timezone.utc) - pd.Timedelta(days=1))
     default_end = parse_default_timestamp(DEFAULTS["end_ts"], datetime.now(timezone.utc))
 
@@ -811,6 +810,305 @@ def main():
         st.error(f"Run packaging failed: {exc}")
         st.info(f"Temporary results kept at {tmp_run_dir} for debugging.")
         return
+
+
+def render_liquidity_tab():
+    """Render the liquidity visualization tab."""
+    st.markdown(
+        """
+        <div class="hero-card">
+            <div class="hero-card__eyebrow" style="font-size:1.15rem;">   Uniswap v3 Liquidity Visualization</div>
+            <p>
+                Generate animated GIFs of Uniswap v3 liquidity profiles over time. 
+                Configure pool, time window, and visualization parameters to create 
+                animated visualizations showing how liquidity distribution changes over time.
+                Uses efficient GraphQL queries with checkpointing and resume capabilities.
+            </p>
+            <div class="hero-card__pills">
+                <span class="hero-card__pill">1 · Configure pool & timeframe</span>
+                <span class="hero-card__pill">2 · Fetch liquidity data</span>
+                <span class="hero-card__pill">3 · Generate animated GIF</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    
+    # Note: liquidity.py is executed as a subprocess, so we don't need to import its functions here
+    
+    default_start = parse_default_timestamp(DEFAULTS.get("start_ts", "2023-01-01T00:00:00Z"), datetime.now(timezone.utc) - pd.Timedelta(days=1))
+    default_end = parse_default_timestamp(DEFAULTS.get("end_ts", "2023-01-10T23:59:59Z"), datetime.now(timezone.utc))
+    
+    with section_card("Pool selection", "Select the pool to visualize liquidity for.", "🧊"):
+        preset_options = ["Custom"] + sorted(POOL_METADATA.keys())
+        preset_choice = st.selectbox("Pool preset", preset_options, index=0, key="liq_preset")
+        pool_display = ""
+        if preset_choice != "Custom":
+            addresses = POOL_METADATA[preset_choice]["addresses"]
+            pool_addr_input = st.selectbox("Pool address", addresses, index=0, key="liq_pool_addr")
+            tokens = POOL_METADATA[preset_choice].get("tokens")
+            if tokens:
+                pool_display = f"{preset_choice} ({'/'.join(tokens)})"
+        else:
+            pool_addr_input = st.text_input(
+                "Pool address",
+                value=str(DEFAULTS.get("pool_addr", "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640")),
+                placeholder="0x...",
+                key="liq_pool_custom",
+            )
+    
+    with section_card("Time window (UTC)", "Set the time range for liquidity visualization.", "⏱️"):
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date = st.date_input("Start date", value=default_start.date(), key="liq_start_date")
+            start_time = st.time_input("Start time", value=default_start.time().replace(tzinfo=None), key="liq_start_time")
+        with col_end:
+            end_date = st.date_input("End date", value=default_end.date(), key="liq_end_date")
+            end_time = st.time_input("End time", value=default_end.time().replace(tzinfo=None), key="liq_end_time")
+        
+        step_seconds = st.number_input(
+            "Step size (seconds)",
+            min_value=60,
+            max_value=86400,
+            value=450,
+            step=60,
+            help="Time interval between liquidity snapshots",
+        )
+    
+    with section_card("Data source", "Choose between subgraph API or CSV files.", "📊"):
+        use_subgraph = st.radio(
+            "Data source",
+            ["Subgraph API", "CSV files"],
+            index=0,
+            key="liq_data_source",
+        )
+        use_subgraph_flag = use_subgraph == "Subgraph API"
+        
+        if use_subgraph_flag:
+            graph_url = st.text_input(
+                "Subgraph endpoint",
+                value=str(DEFAULTS.get("graph_url", "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV")),
+                key="liq_subgraph",
+            )
+            rpc_text = st.text_input(
+                "Ethereum RPC URL",
+                value=str(DEFAULTS.get("json_rpc_urls", ["https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"])[0] if isinstance(DEFAULTS.get("json_rpc_urls"), list) else "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"),
+                key="liq_rpc",
+                help="RPC URL for block timestamp resolution",
+            )
+        else:
+            csv_ticks_input = st.text_input("CSV ticks file path", value="ticks_over_time.csv", key="liq_csv_ticks")
+            csv_pools_input = st.text_input("CSV pools file path", value="pool_state_over_time.csv", key="liq_csv_pools")
+    
+    with section_card("Visualization settings", "Configure plot appearance and animation.", "🎨"):
+        xlog = st.checkbox("Log scale for price axis", value=True, key="liq_xlog")
+        anim_fps = st.number_input("Animation FPS", min_value=1, max_value=30, value=6, key="liq_fps")
+        title_prefix = st.text_input("Title prefix", value="Uniswap v3 Liquidity vs Price", key="liq_title")
+        out_gif = st.text_input("Output GIF filename", value="liquidity_profile.gif", key="liq_gif")
+    
+    with section_card("Advanced settings", "Fine-tune performance and data fetching parameters.", "⚙️"):
+        col_adv1, col_adv2 = st.columns(2)
+        with col_adv1:
+            max_ticks = st.number_input("Max ticks per snapshot", min_value=1000, max_value=1000000, value=100000, step=1000, key="liq_max_ticks")
+            concurrent_blocks = st.number_input("Concurrent blocks", min_value=1, max_value=20, value=6, key="liq_concurrent")
+            tick_page_size = st.number_input("Tick pagination page size", min_value=100, max_value=1000, value=1000, key="liq_tick_page")
+        with col_adv2:
+            graphql_delay = st.number_input("GraphQL delay (seconds)", min_value=0.0, max_value=1.0, value=0.05, step=0.01, key="liq_delay")
+            rpc_retries = st.number_input("RPC retries", min_value=1, max_value=10, value=6, key="liq_rpc_retries")
+            avg_block_time = st.number_input("Avg block time (seconds)", min_value=10.0, max_value=15.0, value=12.0, step=0.1, key="liq_block_time")
+        
+        tick_buffer_input = st.number_input(
+            "Tick buffer (extra ticks beyond observed range)",
+            min_value=0,
+            value=2000,
+            step=500,
+            key="liq_tick_buffer",
+            help=(
+                "Additional ticks to include below the minimum and above the maximum observed tick "
+                "across the selected period. Set to 0 to let the script use its default buffer."
+            ),
+        )
+        tick_buffer = int(tick_buffer_input) if tick_buffer_input > 0 else None
+    
+    with section_card("Output directory", "Where to save checkpoints and output files.", "📁"):
+        default_out_dir = REPO_ROOT / "runs"
+        out_dir = st.text_input("Output directory", value=str(default_out_dir), key="liq_out_dir")
+        st.info("Note: The script uses a stable directory per pool (pool_<first6chars>) to enable checkpointing and resuming. Previously fetched data will be reused if timestamps overlap.", icon="ℹ️")
+    
+    with section_card("Launch visualization", "Generate the liquidity visualization.", "🚀"):
+        run_button = st.button("Start liquidity visualization", type="primary", use_container_width=True, key="liq_run")
+    
+    if not run_button:
+        return
+    
+    # Validate inputs
+    errors = []
+    try:
+        pool_checksum = Web3.to_checksum_address(pool_addr_input.strip())
+        pool_id = pool_checksum.lower()
+    except ValueError:
+        errors.append("Enter a valid pool address (0x-prefixed, 42 chars).")
+        return
+    
+    start_iso, start_dt = isoformat_utc(start_date, start_time)
+    end_iso, end_dt = isoformat_utc(end_date, end_time)
+    if end_dt <= start_dt:
+        errors.append("End time must be after the start time.")
+        return
+    
+    if errors:
+        for err in errors:
+            st.error(err)
+        return
+    
+    # Create config dictionary
+    config = {
+        "pool_id": pool_id,
+        "use_subgraph": use_subgraph_flag,
+        "start_ts": start_iso,
+        "end_ts": end_iso,
+        "step_seconds": int(step_seconds),
+        "xlog": xlog,
+        "max_ticks_per_snapshot": int(max_ticks),
+        "anim_fps": int(anim_fps),
+        "out_gif": out_gif,
+        "title_prefix": title_prefix,
+        "graphql_delay_sec": float(graphql_delay),
+        "out_dir": str(out_dir),
+        "avg_block_time_sec": float(avg_block_time),
+        "rpc_retries": int(rpc_retries),
+        "rpc_backoff_base": 0.6,
+        "concurrent_blocks": int(concurrent_blocks),
+        "tick_pagination_page": int(tick_page_size),
+        "use_cursor_pagination": True,
+        "tick_window": int(tick_buffer) if tick_buffer is not None else None,
+        "save_liquidity_gross": False,
+    }
+    
+    if use_subgraph_flag:
+        config["subgraph"] = graph_url
+        config["eth_rpc_url"] = rpc_text
+    else:
+        config["csv_ticks"] = csv_ticks_input
+        config["csv_pools"] = csv_pools_input
+    
+    # Save config to temp file and execute liquidity.py
+    config_path = Path(tempfile.mkdtemp()) / "liquidity_config.yml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f)
+    
+    # Execute liquidity.py with the config
+    st.info(f"Configuration saved. Starting liquidity visualization...")
+    
+    log_placeholder = st.empty()
+    render_log_output(log_placeholder, "Initializing liquidity visualization...")
+    
+    # We'll need to run liquidity.py as a subprocess or import and call main()
+    # For now, let's create a streamlit-compatible version
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Set environment variable for liquidity.py to use
+        os.environ["LIQUIDITY_CONFIG_PATH"] = str(config_path)
+        
+        # Import and run liquidity functions
+        # We need to adapt liquidity.py to work with Streamlit progress tracking
+        # For now, let's execute it as a subprocess with output capture
+        
+        # Use unbuffered Python for real-time output
+        command = [sys.executable, "-u", "liquidity.py"]
+        env = os.environ.copy()
+        env["LIQUIDITY_CONFIG_PATH"] = str(config_path)
+        env["PYTHONUNBUFFERED"] = "1"
+        
+        process = subprocess.Popen(
+            command,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        
+        lines = []
+        status_text.text("Running liquidity visualization...")
+        
+        # Read output line by line (similar to execute_fetch)
+        assert process.stdout is not None
+        for line in iter(process.stdout.readline, ""):
+            if line == "":
+                break
+            stripped = line.rstrip("\n\r")
+            # Skip ANSI escape sequences and empty lines
+            if stripped and not stripped.startswith("\x1b") and stripped.strip():
+                # Try to extract percentage from tqdm output (format: "XX%|...")
+                pct_match = re.search(r"(\d+)%", stripped)
+                if pct_match:
+                    try:
+                        pct = min(100, max(0, int(pct_match.group(1))))
+                        progress_bar.progress(pct)
+                        status_text.text(f"Progress: {pct}%")
+                    except:
+                        pass
+                
+                lines.append(stripped)
+                if len(lines) > 200:
+                    lines = lines[-200:]  # Keep last 200 lines
+                update_log_output(log_placeholder, lines)
+        
+        return_code = process.wait()
+        
+        if return_code != 0:
+            st.error(f"Liquidity visualization failed with return code {return_code}. Check logs above for details.")
+            # Show last few lines of output for debugging
+            if lines:
+                st.code("\n".join(lines[-20:]))
+            return
+        
+        st.success("Liquidity visualization completed successfully!")
+        progress_bar.progress(100)
+        
+        # Load and display the generated GIF
+        out_dir_path = Path(out_dir)
+        run_name = f"pool_{pool_id[:6]}"
+        run_dir = out_dir_path / run_name
+        gif_path = run_dir / out_gif
+        
+        if gif_path.exists():
+            st.markdown("#### Generated Liquidity Visualization")
+            st.image(str(gif_path), use_container_width=True)
+            
+            # Provide download button
+            with open(gif_path, "rb") as f:
+                st.download_button(
+                    label="Download GIF",
+                    data=f.read(),
+                    file_name=out_gif,
+                    mime="image/gif",
+                )
+        else:
+            st.warning(f"Expected GIF not found at {gif_path}. Check the output directory.")
+            
+    except Exception as e:
+        st.error(f"Error during liquidity visualization: {e}")
+        import traceback
+        st.code(traceback.format_exc(), language="python")
+
+
+def main():
+    st.set_page_config(page_title="Uniswap v3 Tools", layout="centered")
+    apply_layout_styles()
+    
+    tab1, tab2 = st.tabs(["📥 Data Fetcher", "💧 Liquidity Visualization"])
+    
+    with tab1:
+        render_data_fetcher_tab()
+    
+    with tab2:
+        render_liquidity_tab()
 
 
 if __name__ == "__main__":

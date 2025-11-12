@@ -1,0 +1,11 @@
+{
+  "decimals0": 6,
+  "decimals1": 18,
+  "symbol0": "USDC",
+  "symbol1": "WETH",
+  "pool_id": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+  "subgraph": "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+  "start_ts": 1672531200,
+  "end_ts": 1672876799,
+  "step_s": 1800
+}

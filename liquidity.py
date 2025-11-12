@@ -11,7 +11,7 @@ Fixes in this patch
 
 Requirements
 ------------
-pip install requests pandas numpy matplotlib pillow tqdm
+pip install requests pandas numpy matplotlib pillow tqdm pyarrow
 
 Env vars (recommended)
 ----------------------
@@ -24,6 +24,7 @@ export OUT_DIR="runs"   # optional base dir for checkpoints/runs
 from __future__ import annotations
 
 import os
+import shutil
 import re
 import json
 import time
@@ -80,7 +81,7 @@ def load_run_config() -> Dict[str, Any]:
     base_required = {
         "pool_id", "use_subgraph",
         "start_ts", "end_ts", "step_seconds",
-        "xlog", "price_min", "price_max",
+        "xlog",
         "max_ticks_per_snapshot", "anim_fps", "out_gif", "title_prefix",
         "graphql_delay_sec", "out_dir",
         "avg_block_time_sec", "rpc_retries", "rpc_backoff_base",
@@ -126,9 +127,6 @@ def load_run_config() -> Dict[str, Any]:
     cfg["avg_block_time_sec"] = float(cfg["avg_block_time_sec"])
     cfg["rpc_retries"] = int(cfg["rpc_retries"])
     cfg["rpc_backoff_base"] = float(cfg["rpc_backoff_base"])
-    for price_key in ("price_min", "price_max"):
-        if cfg[price_key] is not None:
-            cfg[price_key] = float(cfg[price_key])
     cfg["concurrent_blocks"] = int(cfg["concurrent_blocks"])
     cfg["tick_pagination_page"] = int(cfg["tick_pagination_page"])
     cfg["use_cursor_pagination"] = bool(cfg["use_cursor_pagination"])
@@ -156,11 +154,13 @@ POOL_ID = str(RUN_CONFIG["pool_id"]).strip().lower()
 # Choose data source:
 USE_SUBGRAPH = bool(RUN_CONFIG["use_subgraph"])
 
-# GraphQL endpoint for Uniswap v3 subgraph
-SUBGRAPH = RUN_CONFIG["subgraph"]
+# GraphQL endpoint for Uniswap v3 subgraph (only when USE_SUBGRAPH=True)
+# Note: load_run_config() validates this is present when USE_SUBGRAPH=True
+SUBGRAPH = RUN_CONFIG.get("subgraph", "")
 
-# Ethereum mainnet RPC for block-by-timestamp lookups (REQUIRED for USE_SUBGRAPH=True)
-ETH_RPC_URL = RUN_CONFIG["eth_rpc_url"]
+# Ethereum mainnet RPC for block-by-timestamp lookups (only when USE_SUBGRAPH=True)
+# Note: load_run_config() validates this is present when USE_SUBGRAPH=True
+ETH_RPC_URL = RUN_CONFIG.get("eth_rpc_url", "")
 
 # Sampling strategy (UTC)
 START_TIMESTAMP = RUN_CONFIG["start_ts"]   # inclusive
@@ -170,13 +170,13 @@ STEP_SECONDS    = RUN_CONFIG["step_seconds"]  # sample cadence, seconds
 # If USE_SUBGRAPH = False, point to CSVs you prepared:
 # - ticks file (long form): columns ['t','block','tickIdx','liquidityNet']
 # - pool state file: columns ['t','block','tick','liquidity']
-CSV_TICKS = RUN_CONFIG["csv_ticks"]
-CSV_POOLS = RUN_CONFIG["csv_pools"]
+CSV_TICKS = RUN_CONFIG.get("csv_ticks", "")
+CSV_POOLS = RUN_CONFIG.get("csv_pools", "")
 
 # Plot controls
 XLOG = bool(RUN_CONFIG["xlog"])
-PRICE_MIN = RUN_CONFIG["price_min"]
-PRICE_MAX = RUN_CONFIG["price_max"]
+PRICE_MIN = None
+PRICE_MAX = None
 MAX_TICKS_PER_SNAPSHOT = RUN_CONFIG["max_ticks_per_snapshot"]
 ANIM_FPS = RUN_CONFIG["anim_fps"]
 OUT_GIF = RUN_CONFIG["out_gif"]
@@ -206,6 +206,7 @@ TICK_PAGE_SIZE = int(RUN_CONFIG.get("tick_pagination_page", 1000))
 USE_CURSOR_PAGINATION = bool(RUN_CONFIG.get("use_cursor_pagination", True))
 TICK_WINDOW = RUN_CONFIG.get("tick_window")
 SAVE_LIQUIDITY_GROSS = bool(RUN_CONFIG.get("save_liquidity_gross", False))
+DEFAULT_TICK_BUFFER = 2000
 
 # ============== HELPERS ==============
 
@@ -214,6 +215,7 @@ def _ensure_dirs() -> None:
     TICKS_DIR.mkdir(parents=True, exist_ok=True)
 
 _SESSION_LOCAL = threading.local()
+_RPC_SESSION_LOCAL = threading.local()
 
 def _get_session() -> requests.Session:
     s = getattr(_SESSION_LOCAL, "session", None)
@@ -223,6 +225,17 @@ def _get_session() -> requests.Session:
         s.mount("http://", adapter)
         s.mount("https://", adapter)
         _SESSION_LOCAL.session = s
+    return s
+
+
+def _get_rpc_session() -> requests.Session:
+    s = getattr(_RPC_SESSION_LOCAL, "session", None)
+    if s is None:
+        s = requests.Session()
+        adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        _RPC_SESSION_LOCAL.session = s
     return s
 
 def _graphql(endpoint: str, query: str, variables: Optional[dict] = None,
@@ -260,7 +273,7 @@ def _rpc(method: str, params: list, timeout: float = 45.0) -> Any:
     last_exc = None
     for attempt in range(RPC_RETRIES):
         try:
-            r = requests.post(ETH_RPC_URL, json=body, timeout=timeout)
+            r = _get_rpc_session().post(ETH_RPC_URL, json=body, timeout=timeout)
             r.raise_for_status()
             j = r.json()
             if "error" in j:
@@ -310,30 +323,8 @@ def fetch_block_by_timestamp(ts: int, hint_block: Optional[int] = None,
     if ts > latest_ts:
         return latest_num
 
-    # Initial guess
-    if hint_block is None:
-        delta_s = max(0, latest_ts - ts)
-        guess = int(max(0, latest_num - round(delta_s / max(1.0, AVG_BLOCK_TIME_SEC))))
-    else:
-        guess = hint_block
-
-    guess = max(0, min(guess, latest_num))
-    t_guess = int(_get_block_by_number(guess)["timestamp"], 16)
-
-    if t_guess >= ts:
-        return _first_block_binary(ts, 0, guess)
-    else:
-        # Jump forward with doubling until we bracket
-        step = max(1, int((ts - t_guess) / max(1.0, AVG_BLOCK_TIME_SEC)))
-        lo = guess
-        hi = min(latest_num, guess + step)
-        t_hi = int(_get_block_by_number(hi)["timestamp"], 16)
-        while t_hi < ts and hi < latest_num:
-            lo = hi
-            step = min(latest_num - hi, max(1, step * 2))
-            hi = hi + step
-            t_hi = int(_get_block_by_number(hi)["timestamp"], 16)
-        return _first_block_binary(ts, lo, hi)
+    # Use a direct binary search without complex heuristics for robustness
+    return _first_block_binary(ts, 0, latest_num)
 
 # -------- Uniswap v3 subgraph queries --------
 
@@ -375,21 +366,18 @@ def fetch_pool_state_at_block(pool_id: str, block_number: Optional[int] = None) 
     return data.get("pool")
 
 def fetch_ticks_at_block(pool_id: str, block_number: int,
-                         center_tick: Optional[int] = None,
-                         window: Optional[int] = None) -> pd.DataFrame:
+                         lower_tick: Optional[int] = None,
+                         upper_tick: Optional[int] = None) -> pd.DataFrame:
     """
     Fetch initialized ticks at a specific block using cursor pagination on tickIdx.
-    Optionally restrict to a window [center_tick - window, center_tick + window].
+    Optionally restrict to a window [lower_tick, upper_tick].
     Returns a sorted DataFrame with big-int friendly dtypes.
     """
     rows: list[dict[str, int]] = []
 
     after: Optional[int] = None
-    lower: Optional[int] = None
-    upper: Optional[int] = None
-    if center_tick is not None and window is not None:
-        lower = int(center_tick) - int(window)
-        upper = int(center_tick) + int(window)
+    lower = int(lower_tick) if lower_tick is not None else None
+    upper = int(upper_tick) if upper_tick is not None else None
 
     while True:
         # Build the where clause dynamically
@@ -448,6 +436,58 @@ def fetch_ticks_at_block(pool_id: str, block_number: int,
     if SAVE_LIQUIDITY_GROSS and "liquidityGross" in df.columns:
         df["liquidityGross"] = df["liquidityGross"].astype(object)
     return df
+
+
+def _fetch_event_timestamps(entity: str, pool_id: str, start_ts: int, end_ts: int,
+                            page: int = 1000) -> List[int]:
+    """
+    Fetch timestamps for a specific event type (mints/burns) ordered ascending.
+    """
+    rows: list[int] = []
+    cursor: Optional[int] = None
+
+    while True:
+        where_parts = ["pool: $pool", "timestamp_gte: $start", "timestamp_lt: $end"]
+        if cursor is not None:
+            where_parts.append("timestamp_gt: $cursor")
+        where_expr = ", ".join(where_parts)
+
+        q = f"""
+        query($pool: String!, $start: Int!, $end: Int!, $n: Int!, $cursor: Int) {{
+          {entity}(first: $n, orderBy: timestamp, orderDirection: asc,
+                  where: {{ {where_expr} }}) {{
+            timestamp
+          }}
+        }}
+        """
+        vars_ = {
+            "pool": pool_id,
+            "start": int(start_ts),
+            "end": int(end_ts),
+            "n": page,
+            "cursor": cursor,
+        }
+        data = _graphql(SUBGRAPH, q, vars_)
+        chunk = data.get(entity, [])
+        if not chunk:
+            break
+        for item in chunk:
+            rows.append(int(item["timestamp"]))
+        cursor = int(chunk[-1]["timestamp"])
+        if len(chunk) < page:
+            break
+    return rows
+
+
+def fetch_mint_burn_timestamps(pool_id: str, start_ts: int, end_ts: int) -> List[int]:
+    """
+    Return sorted unique timestamps for Mint and Burn events within [start_ts, end_ts).
+    """
+    if start_ts >= end_ts:
+        return []
+    mints = _fetch_event_timestamps("mints", pool_id, start_ts, end_ts)
+    burns = _fetch_event_timestamps("burns", pool_id, start_ts, end_ts)
+    return sorted(set(mints + burns))
 
 # -------- Parsing / big-int utilities --------
 
@@ -568,12 +608,43 @@ def frame_plot(ax, price_edges, L_values, title, xlog=True, pmin=None, pmax=None
         ax.set_xscale("log")
     if pmin is not None and pmax is not None and pmax > pmin:
         ax.set_xlim(pmin, pmax)
-    ax.grid(True, which="both", alpha=0.3)
+    # ax.grid(True, which="both", alpha=0.3)
 
 # -------- Checkpointing helpers --------
 
 def ticks_path(block: int) -> pathlib.Path:
+    return TICKS_DIR / f"ticks_{block}.parquet"
+
+
+def _legacy_ticks_path(block: int) -> pathlib.Path:
     return TICKS_DIR / f"ticks_{block}.csv"
+
+
+def _prepare_ticks_df_for_storage(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ("liquidityNet", "liquidityGross"):
+        if col in out.columns:
+            out[col] = out[col].astype("string")
+    return out
+
+
+def _ensure_parquet_ticks(block: int) -> pathlib.Path:
+    path = ticks_path(block)
+    if path.exists():
+        return path
+    legacy_path = _legacy_ticks_path(block)
+    if not legacy_path.exists():
+        return path
+    legacy_df = pd.read_csv(legacy_path, dtype={"tickIdx": np.int64})
+    save_df = _prepare_ticks_df_for_storage(legacy_df)
+    try:
+        save_df.to_parquet(path, index=False)
+    except ImportError as exc:
+        raise ImportError(
+            "Converting legacy tick snapshots requires the 'pyarrow' package. "
+            "Install it with 'pip install pyarrow'."
+        ) from exc
+    return path
 
 def save_manifest(df: pd.DataFrame) -> None:
     df.to_csv(MANIFEST_PATH, index=False)
@@ -673,6 +744,9 @@ def build_or_load_manifest() -> pd.DataFrame:
 
         # Sort and reset idx monotonically
         df = df.sort_values("t").reset_index(drop=True)
+        # Remove existing idx column if it exists, then insert a new one
+        if "idx" in df.columns:
+            df = df.drop(columns=["idx"])
         df.insert(0, "idx", np.arange(len(df), dtype=int))
     else:
         print(f"Sampling blocks every {STEP_SECONDS}s from {START_TIMESTAMP} to {END_TIMESTAMP} …")
@@ -685,7 +759,7 @@ def build_or_load_manifest() -> pd.DataFrame:
 
 def fetch_and_checkpoint(pool_id: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
-    Fetch missing frames as per manifest, writing per-block tick CSVs and pool info.
+    Fetch missing frames as per manifest, writing per-block tick Parquet files and pool info.
     Respects prior progress and resumes. Returns the updated manifest and meta dict.
     """
     if not ETH_RPC_URL:
@@ -698,67 +772,186 @@ def fetch_and_checkpoint(pool_id: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     if df_ok.empty:
         raise RuntimeError("No resolvable blocks found in manifest (block column is NaN).")
 
-    todo_mask = (df_ok["status"] != "done")
-    todo_idx = df_ok.index[todo_mask].tolist()
-    pbar = tqdm(total=len(todo_idx), desc="Fetching snapshots")
-
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def _fetch_snapshot(ridx: int):
-        row = df_ok.loc[ridx]
+    # Phase 1: ensure pool_tick and pool_liquidity populated for all rows
+    missing_state_idx = df_ok.index[
+        df_ok["pool_tick"].isna() | df_ok["pool_liquidity"].isna()
+    ].tolist()
+
+    if missing_state_idx:
+        pbar_state = tqdm(total=len(missing_state_idx), desc="Fetching pool states")
+        with ThreadPoolExecutor(max_workers=CONCURRENT_BLOCKS) as ex:
+            futs = {
+                ex.submit(
+                    fetch_pool_state_at_block,
+                    pool_id,
+                    int(df_ok.loc[ridx, "block"]),
+                ): ridx
+                for ridx in missing_state_idx
+            }
+
+            for fut in as_completed(futs):
+                ridx = futs[fut]
+                blk = int(df.loc[ridx, "block"])
+                try:
+                    pool = fut.result()
+                    if not pool:
+                        df.loc[ridx, "error"] = f"pool_state: not found at block {blk}"
+                    else:
+                        tick_val = pool.get("tick")
+                        df.loc[ridx, "pool_tick"] = int(tick_val) if tick_val is not None else np.nan
+                        liq_val = pool.get("liquidity")
+                        df.loc[ridx, "pool_liquidity"] = int(liq_val) if liq_val is not None else np.nan
+                        df.loc[ridx, "error"] = ""
+                        if meta is None:
+                            meta = {
+                                "decimals0": int(pool["token0"]["decimals"]),
+                                "decimals1": int(pool["token1"]["decimals"]),
+                                "symbol0": pool["token0"]["symbol"],
+                                "symbol1": pool["token1"]["symbol"],
+                                "pool_id": pool_id,
+                                "subgraph": SUBGRAPH,
+                                "start_ts": START_TIMESTAMP,
+                                "end_ts": END_TIMESTAMP,
+                                "step_s": STEP_SECONDS,
+                            }
+                            save_meta_once(meta)
+                except Exception as e:
+                    df.loc[ridx, "error"] = f"pool_state: {str(e)[:180]}"
+                finally:
+                    save_manifest(df)
+                    pbar_state.update(1)
+        pbar_state.close()
+
+    df_state = df[~df["block"].isna() & ~df["pool_tick"].isna()].copy()
+    if df_state.empty:
+        raise RuntimeError(
+            "Unable to determine pool ticks for the requested window. "
+            f"See manifest at {MANIFEST_PATH} for errors."
+        )
+
+    tick_buffer = 10000
+    min_tick = int(df_state["pool_tick"].min())
+    max_tick = int(df_state["pool_tick"].max())
+    global_lower_tick = min_tick - tick_buffer
+    global_upper_tick = max_tick + tick_buffer
+    print(f"Observed tick range over window: [{min_tick}, {max_tick}]")
+    print(f"Using global tick bounds: [{global_lower_tick}, {global_upper_tick}] (buffer={tick_buffer})")
+
+    df_state_sorted = df_state.sort_values("t")
+    event_ts = fetch_mint_burn_timestamps(pool_id, START_TIMESTAMP, END_TIMESTAMP)
+    if event_ts:
+        print(f"Mint/Burn events in window: {len(event_ts)}")
+
+    rep_plan: list[tuple[int, int]] = []
+    reuse_plan: list[tuple[int, int, int]] = []
+
+    event_idx = 0
+    last_event_ts: Optional[int] = None
+    last_rep_block: Optional[int] = None
+    last_rep_time = START_TIMESTAMP - 1
+
+    for ridx, row in df_state_sorted.iterrows():
+        t = int(row["t"])
         blk = int(row["block"])
-        tpath = ticks_path(blk)
-        if row["status"] == "done" and tpath.exists():
-            return {"ridx": ridx, "skipped": True}
+        tpath = _ensure_parquet_ticks(blk)
 
-        pool = fetch_pool_state_at_block(pool_id, blk)
-        if pool is None:
-            raise RuntimeError(f"Pool not found at block {blk} (pool may not exist at this block yet)")
+        while event_idx < len(event_ts) and event_ts[event_idx] <= t:
+            last_event_ts = event_ts[event_idx]
+            event_idx += 1
 
-        center = int(pool["tick"]) if pool.get("tick") is not None else None
-        ticks_df = fetch_ticks_at_block(pool_id, blk, center_tick=center, window=TICK_WINDOW)
-        ticks_df.to_csv(tpath, index=False)
-        return {
-            "ridx": ridx,
-            "pool_tick": int(pool["tick"]),
-            "pool_liquidity": int(pool["liquidity"]),
-            "meta": {
-                "decimals0": int(pool["token0"]["decimals"]),
-                "decimals1": int(pool["token1"]["decimals"]),
-                "symbol0": pool["token0"]["symbol"],
-                "symbol1": pool["token1"]["symbol"],
-                "pool_id": pool_id,
-                "subgraph": SUBGRAPH,
-                "start_ts": START_TIMESTAMP,
-                "end_ts": END_TIMESTAMP,
-                "step_s": STEP_SECONDS,
-            },
-        }
+        if tpath.exists():
+            df.loc[ridx, "status"] = "done"
+            df.loc[ridx, "error"] = ""
+            last_rep_block = blk
+            last_rep_time = t
+            continue
 
-    with ThreadPoolExecutor(max_workers=CONCURRENT_BLOCKS) as ex:
-        futs = [ex.submit(_fetch_snapshot, ridx) for ridx in todo_idx]
-        for fut in as_completed(futs):
-            try:
-                res = fut.result()
-                ridx = res.get("ridx")
-                if res.get("skipped"):
-                    pbar.update(1)
-                    continue
-                if meta is None and res.get("meta"):
-                    meta = res["meta"]
-                    save_meta_once(meta)
-                df.loc[ridx, "pool_tick"] = int(res["pool_tick"]) if res.get("pool_tick") is not None else df.loc[ridx, "pool_tick"]
-                df.loc[ridx, "pool_liquidity"] = int(res["pool_liquidity"]) if res.get("pool_liquidity") is not None else df.loc[ridx, "pool_liquidity"]
+        needs_rep = False
+        if last_rep_block is None:
+            needs_rep = True
+        elif last_event_ts is not None and last_event_ts > last_rep_time:
+            needs_rep = True
+
+        if needs_rep:
+            rep_plan.append((ridx, blk))
+            last_rep_block = blk
+            last_rep_time = t
+        else:
+            reuse_plan.append((ridx, blk, last_rep_block))
+
+    if rep_plan or reuse_plan:
+        save_manifest(df)
+
+    print(f"Tick snapshots to fetch: {len(rep_plan)} | to reuse: {len(reuse_plan)}")
+
+    if rep_plan:
+        pbar_fetch = tqdm(total=len(rep_plan), desc="Fetching tick data (event-driven)")
+        with ThreadPoolExecutor(max_workers=CONCURRENT_BLOCKS) as ex:
+            futs = {
+                ex.submit(
+                    fetch_ticks_at_block,
+                    pool_id,
+                    blk,
+                    global_lower_tick,
+                    global_upper_tick,
+                ): (ridx, blk)
+                for ridx, blk in rep_plan
+            }
+
+            for fut in as_completed(futs):
+                ridx, blk = futs[fut]
+                tpath = ticks_path(blk)
+                try:
+                    ticks_df = fut.result()
+                    save_df = _prepare_ticks_df_for_storage(ticks_df)
+                    try:
+                        save_df.to_parquet(tpath, index=False)
+                    except ImportError as exc:
+                        raise ImportError(
+                            "Writing tick snapshots requires the 'pyarrow' package. "
+                            "Install it with 'pip install pyarrow'."
+                        ) from exc
+                    df.loc[ridx, "status"] = "done"
+                    df.loc[ridx, "error"] = ""
+                except Exception as e:
+                    df.loc[ridx, "status"] = "error"
+                    df.loc[ridx, "error"] = f"tick_fetch: {str(e)[:180]}"
+                finally:
+                    save_manifest(df)
+                    pbar_fetch.update(1)
+        pbar_fetch.close()
+
+    if reuse_plan:
+        reused = 0
+        for ridx, blk, src_blk in reuse_plan:
+            if src_blk is None:
+                continue
+            src = _ensure_parquet_ticks(src_blk)
+            dst = ticks_path(blk)
+
+            if dst.exists():
                 df.loc[ridx, "status"] = "done"
                 df.loc[ridx, "error"] = ""
-            except Exception as e:
-                # If we cannot identify ridx, skip marking; minimal logging
-                pass
-            finally:
-                save_manifest(df)
-                pbar.update(1)
+                continue
 
-    pbar.close()
+            if not src.exists():
+                print(f"[warn] Cannot reuse ticks for block {blk}; source {src_blk} missing.")
+                continue
+
+            try:
+                os.link(src, dst)
+            except Exception:
+                shutil.copy2(src, dst)
+
+            df.loc[ridx, "status"] = "done"
+            df.loc[ridx, "error"] = ""
+            reused += 1
+            save_manifest(df)
+
+        if reused:
+            print(f"Reused tick snapshots from previous blocks: {reused}")
 
     if meta is None:
         loaded = load_meta()
@@ -831,11 +1024,20 @@ def load_snapshots_from_subgraph(pool_id: str) -> Tuple[pd.DataFrame, Dict[str, 
         t = int(row["t"])
         pool_tick = int(row["pool_tick"])
         pool_liq = int(row["pool_liquidity"])
-        tpath = ticks_path(blk)
+        tpath = _ensure_parquet_ticks(blk)
         if not tpath.exists():
             continue
         # Read ticks; don't force int64 for liquidityNet, parse later
-        ticks_df = pd.read_csv(tpath, dtype={"tickIdx": np.int64})
+        try:
+            ticks_df = pd.read_parquet(tpath)
+        except ImportError as exc:
+            raise ImportError(
+                "Reading tick snapshots requires the 'pyarrow' package. "
+                "Install it with 'pip install pyarrow'."
+            ) from exc
+        for col in ("liquidityNet", "liquidityGross"):
+            if col in ticks_df.columns:
+                ticks_df[col] = ticks_df[col].astype(str)
         frames.append({
             "t": t,
             "block": blk,
