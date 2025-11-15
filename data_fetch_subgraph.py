@@ -190,9 +190,9 @@ def gql(query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
 
 
 Q_SWAP_PAGE = """
-query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $afterId: ID!, $n: Int!) {
+query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $n: Int!) {
   swaps(first: $n, orderBy: timestamp, orderDirection: asc,
-        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi, id_gt: $afterId }) {
+        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi }) {
     id
     timestamp
     logIndex
@@ -209,9 +209,9 @@ query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $afterId: ID!, $n: Int!) {
 """
 
 Q_MINT_PAGE = """
-query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $afterId: ID!, $n: Int!) {
+query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $n: Int!) {
   mints(first: $n, orderBy: timestamp, orderDirection: asc,
-        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi, id_gt: $afterId }) {
+        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi }) {
     id
     timestamp
     logIndex
@@ -229,9 +229,9 @@ query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $afterId: ID!, $n: Int!) {
 """
 
 Q_BURN_PAGE = """
-query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $afterId: ID!, $n: Int!) {
+query($pool: Bytes!, $lo: BigInt!, $hi: BigInt!, $n: Int!) {
   burns(first: $n, orderBy: timestamp, orderDirection: asc,
-        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi, id_gt: $afterId }) {
+        where: { pool: $pool, timestamp_gte: $lo, timestamp_lt: $hi }) {
     id
     timestamp
     logIndex
@@ -303,6 +303,7 @@ def fetch_pool_state_and_decimals_at_block(pool: str, block_num: int) -> Tuple[i
 @dataclass
 class Cursor:
     last_id: str = ""
+    last_timestamp: Optional[int] = None
     exhausted: bool = False
 
 
@@ -568,33 +569,27 @@ class Streams:
     buf_burn: List[Dict[str, Any]]
 
 
+def _cursor_lo(lo_ts: int, cur: Cursor) -> int:
+    """Lower timestamp bound to request for this cursor."""
+    return lo_ts if cur.last_timestamp is None else max(lo_ts, int(cur.last_timestamp))
+
+
 def page_swaps(pool: str, lo_ts: int, hi_ts: int, cur: Cursor) -> List[Dict[str, Any]]:
-    d = gql(Q_SWAP_PAGE, {"pool": pool, "lo": lo_ts, "hi": hi_ts, "afterId": cur.last_id or "", "n": PAGE_SIZE})
+    eff_lo = _cursor_lo(lo_ts, cur)
+    d = gql(Q_SWAP_PAGE, {"pool": pool, "lo": eff_lo, "hi": hi_ts, "n": PAGE_SIZE})
     return d.get("swaps") or []
 
+
 def page_mints(pool: str, lo_ts: int, hi_ts: int, cur: Cursor) -> List[Dict[str, Any]]:
-    d = gql(Q_MINT_PAGE, {"pool": pool, "lo": lo_ts, "hi": hi_ts, "afterId": cur.last_id or "", "n": PAGE_SIZE})
+    eff_lo = _cursor_lo(lo_ts, cur)
+    d = gql(Q_MINT_PAGE, {"pool": pool, "lo": eff_lo, "hi": hi_ts, "n": PAGE_SIZE})
     return d.get("mints") or []
 
+
 def page_burns(pool: str, lo_ts: int, hi_ts: int, cur: Cursor) -> List[Dict[str, Any]]:
-    d = gql(Q_BURN_PAGE, {"pool": pool, "lo": lo_ts, "hi": hi_ts, "afterId": cur.last_id or "", "n": PAGE_SIZE})
+    eff_lo = _cursor_lo(lo_ts, cur)
+    d = gql(Q_BURN_PAGE, {"pool": pool, "lo": eff_lo, "hi": hi_ts, "n": PAGE_SIZE})
     return d.get("burns") or []
-
-
-@dataclass
-class Cursor:
-    last_id: str = ""
-    exhausted: bool = False
-
-
-@dataclass
-class Streams:
-    swap: Cursor
-    mint: Cursor
-    burn: Cursor
-    buf_swap: List[Dict[str, Any]]
-    buf_mint: List[Dict[str, Any]]
-    buf_burn: List[Dict[str, Any]]
 
 
 def merged_event_stream(pool: str, lo_ts: int, hi_ts: int) -> Iterator[Tuple[str, Dict[str, Any]]]:
@@ -610,10 +605,25 @@ def merged_event_stream(pool: str, lo_ts: int, hi_ts: int) -> Iterator[Tuple[str
             if not page:
                 cur.exhausted = True
                 break
-            buf.extend(page)
-            cur.last_id = page[-1]["id"]
-            if len(buf) > 0:
+            last_ts = cur.last_timestamp
+            last_id = cur.last_id or ""
+            fresh: List[Dict[str, Any]] = []
+            for ev in page:
+                ts = int(ev["timestamp"])
+                if last_ts is not None:
+                    if ts < last_ts:
+                        continue
+                    if ts == last_ts and last_id and ev["id"] <= last_id:
+                        continue
+                fresh.append(ev)
+            if not fresh:
+                cur.exhausted = True
                 break
+            buf.extend(fresh)
+            last_ev = fresh[-1]
+            cur.last_timestamp = int(last_ev["timestamp"])
+            cur.last_id = last_ev["id"]
+            break
 
     refill("swap"); refill("mint"); refill("burn")
 
@@ -744,19 +754,53 @@ else:
         "out_pickle_dir": OUT_DIR,
         "cursor": {
             "swap_last_id": "",
+            "swap_last_ts": START_TS,
             "mint_last_id": "",
+            "mint_last_ts": START_TS,
             "burn_last_id": "",
+            "burn_last_ts": START_TS,
             "exhausted_swap": False,
             "exhausted_mint": False,
             "exhausted_burn": False,
-            "last_timestamp_seen": START_TS,
         },
     }
     save_checkpoint(CHECKPOINT_PATH, ckpt)
 
-cur_swap = Cursor(ckpt["cursor"]["swap_last_id"], ckpt["cursor"]["exhausted_swap"])
-cur_mint = Cursor(ckpt["cursor"]["mint_last_id"], ckpt["cursor"]["exhausted_mint"])
-cur_burn = Cursor(ckpt["cursor"]["burn_last_id"], ckpt["cursor"]["exhausted_burn"])
+cursor_meta = ckpt.setdefault("cursor", {})
+cursor_meta.setdefault("swap_last_id", "")
+cursor_meta.setdefault("mint_last_id", "")
+cursor_meta.setdefault("burn_last_id", "")
+cursor_meta.setdefault("swap_last_ts", START_TS)
+cursor_meta.setdefault("mint_last_ts", START_TS)
+cursor_meta.setdefault("burn_last_ts", START_TS)
+cursor_meta.setdefault("exhausted_swap", False)
+cursor_meta.setdefault("exhausted_mint", False)
+cursor_meta.setdefault("exhausted_burn", False)
+
+def _ckpt_ts(key: str) -> Optional[int]:
+    val = cursor_meta.get(key)
+    if val is None:
+        return START_TS
+    try:
+        return int(val)
+    except Exception:
+        return START_TS
+
+cur_swap = Cursor(
+    last_id=cursor_meta.get("swap_last_id", ""),
+    last_timestamp=_ckpt_ts("swap_last_ts"),
+    exhausted=cursor_meta.get("exhausted_swap", False),
+)
+cur_mint = Cursor(
+    last_id=cursor_meta.get("mint_last_id", ""),
+    last_timestamp=_ckpt_ts("mint_last_ts"),
+    exhausted=cursor_meta.get("exhausted_mint", False),
+)
+cur_burn = Cursor(
+    last_id=cursor_meta.get("burn_last_id", ""),
+    last_timestamp=_ckpt_ts("burn_last_ts"),
+    exhausted=cursor_meta.get("exhausted_burn", False),
+)
 
 def merged_stream_with_cursors(pool: str, lo_ts: int, hi_ts: int, cur_swap: Cursor, cur_mint: Cursor, cur_burn: Cursor):
     st = Streams(cur_swap, cur_mint, cur_burn, [], [], [])
@@ -772,11 +816,27 @@ def merged_stream_with_cursors(pool: str, lo_ts: int, hi_ts: int, cur_swap: Curs
             if not page:
                 cur.exhausted = True
                 break
-            buf.extend(page)
-            cur.last_id = page[-1]["id"]
-            ckpt["cursor"][f"{kind}_last_id"] = cur.last_id
-            if len(buf) > 0:
+            last_ts = cur.last_timestamp
+            last_id = cur.last_id or ""
+            fresh: List[Dict[str, Any]] = []
+            for ev in page:
+                ts = int(ev["timestamp"])
+                if last_ts is not None:
+                    if ts < last_ts:
+                        continue
+                    if ts == last_ts and last_id and ev["id"] <= last_id:
+                        continue
+                fresh.append(ev)
+            if not fresh:
+                cur.exhausted = True
                 break
+            buf.extend(fresh)
+            last_ev = fresh[-1]
+            cur.last_timestamp = int(last_ev["timestamp"])
+            cur.last_id = last_ev["id"]
+            ckpt["cursor"][f"{kind}_last_id"] = cur.last_id
+            ckpt["cursor"][f"{kind}_last_ts"] = cur.last_timestamp
+            break
 
     refill("swap"); refill("mint"); refill("burn")
 

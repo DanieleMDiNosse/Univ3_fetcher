@@ -1,6 +1,8 @@
 # Uniswap v3 Data Downloader
 
+![Data example](docs/assets/example_data.png)
 ![Liquidity profile animation](docs/assets/liquidity_profile.gif)
+
 
 ## Highlights
 - **Guided runs:** Streamlit UI wires up configs for you (subgraph URL, multi-RPC list, pool preset/custom address, time window, column selection, destination folder).
