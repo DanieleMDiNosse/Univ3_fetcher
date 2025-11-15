@@ -14,7 +14,7 @@
 
 1. **Streamlit data fetcher**
    ```bash
-   streamlit run streamlit_app.py
+   PYTHONPATH=$PWD streamlit run univ3_fetcher/ui/streamlit_app.py
    ```
    - Enter your Uniswap v3 subgraph endpoint plus one or more HTTPS JSON-RPC URLs.
    - Pick a pool (preset or custom address), choose the UTC window, and select the columns you need (gas columns toggle receipt lookups).
@@ -41,7 +41,7 @@
 - Subgraph-first event harvester with resilience features: automatic chunking, resumable checkpoints, retry/backoff for receipts, and derived price plus before/after pool state fields.
 - Real-time log streaming in the app plus organized run artifacts (configs, logs, raw chunk pickles, merged output, metadata JSON).
 - Selective gas and transaction metadata retrieval—receipts are only fetched when you opt into gas columns.
-- Standalone liquidity profile animator (`liquidity.py`) that turns historical tick snapshots into GIFs with progress bars and resume support.
+- Standalone liquidity profile animator (`python -m univ3_fetcher.core.liquidity.animator`) that turns historical tick snapshots into GIFs with progress bars and resume support.
 
 ## Requirements
 - Python 3.11.x (the on-chain dependency `web3-ethereum-defi` — imported as `eth_defi` — does not yet publish wheels for 3.12+).
@@ -79,10 +79,11 @@ pip install -r requirements.txt
 </details>
 
 ## Running the Streamlit App
-1. Activate your environment and start Streamlit:
+1. Activate your environment and start Streamlit (ensure the repo root is on `PYTHONPATH`):
    ```bash
-   streamlit run streamlit_app.py
+   PYTHONPATH=$PWD streamlit run univ3_fetcher/ui/streamlit_app.py
    ```
+   *(On Windows PowerShell use `setx PYTHONPATH %CD%` for the session or prefix the command with `$env:PYTHONPATH=(Get-Location)`.)*
 2. Provide the Uniswap v3 subgraph endpoint (The Graph hosted service or your Gateway URL).
 3. Enter one or more HTTPS JSON-RPC URLs. Multiple endpoints improve reliability because the fetcher uses `web3-ethereum-defi`'s multi-provider client.
 4. Pick a pool preset or input a custom pool address. Presets automatically surface known Uniswap v3 pools and token metadata.
@@ -97,36 +98,36 @@ pip install -r requirements.txt
 
 After a successful run, the final directory (inside `downloads/` by default) contains:
 - `config/data_fetch_config.yml`: exact parameters used.
-- `logs/data_fetch.log`: full stdout from `data_fetch_subgraph.py`.
+- `logs/data_fetch.log`: full stdout from the subgraph harvester.
 - `outputs/chunks/<pool>/`: raw chunk pickles emitted by the harvester.
 - `outputs/merged/<pool>.pkl`: filtered dataset matching your column choices.
 - `metadata.json`: summary metadata (pool label, time range, row counts, artifact paths).
 
 ## CLI Harvesters
 
-### `data_fetch_subgraph.py` (default)
-The Streamlit app invokes this script under the hood, and you can call it directly if you prefer automation:
+### Subgraph harvester (default)
+The Streamlit app invokes this module under the hood, and you can call it directly if you prefer automation:
 
 ```bash
-python data_fetch_subgraph.py
+python -m univ3_fetcher.core.harvesters.subgraph_harvester
 ```
 
 By default it reads `data_fetch_config.yml`; override the path with `DATA_FETCH_CONFIG_PATH`. Key config fields include `graph_url`, `json_rpc_urls`, `pool_addr`, `start_ts`, `end_ts`, `subgraph_page_size`, `chunk_events`, `batch_receipt_size`, `checkpoint_path`, `out_dir`, `skip_gas_data`, and `compute_price_column`. The harvester checkpoints progress and can be restarted safely with the same config.
 
-### `data_fetch.py` (legacy RPC-only)
+### Legacy RPC-only harvester
 The original RPC-first pipeline remains available for environments where the subgraph cannot be reached. It shares most configuration keys with the subgraph variant but relies on `chunk_size_blocks`/`parallel_workers` instead of `subgraph_page_size`/`chunk_events`.
 
 ```bash
-python data_fetch.py
+python -m univ3_fetcher.core.harvesters.rpc_harvester
 ```
 
 ## Liquidity Profile Animator
-- `liquidity.py` consumes `liquidity_config.yml` (override with `LIQUIDITY_CONFIG_PATH`) to build an animated GIF of the pool's liquidity over time.
+- `univ3_fetcher.core.liquidity.animator` consumes `liquidity_config.yml` (override with `LIQUIDITY_CONFIG_PATH`) to build an animated GIF of the pool's liquidity over time.
 - The config supports both subgraph-powered runs (`use_subgraph: true`) and offline CSV replays. Required keys include `pool_id`, `start_ts`, `end_ts`, `step_seconds`, pagination limits, and output paths.
 - Run it with:
 
 ```bash
-python liquidity.py
+python -m univ3_fetcher.core.liquidity.animator
 ```
 
 - Each execution writes checkpoints, intermediate CSV/parquet artifacts, and the final GIF under `runs/<timestamped_folder>/`.

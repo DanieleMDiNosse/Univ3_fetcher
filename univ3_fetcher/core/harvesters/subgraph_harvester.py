@@ -805,79 +805,79 @@ def run_harvester():
         if not buf_rows:
             return
 
-    # Progress for receipts
-    swap_txs = sorted(set([r.transactionHash for r in buf_rows if r.eventType.startswith("swap")]))
-    receipts_map: Dict[str, Any] = {}
-    if swap_txs:
-        pb_rc = TQDM(total=len(swap_txs), desc="Receipts")
-        for i in range(0, len(swap_txs), BATCH_RECEIPT_SIZE):
-            batch = swap_txs[i:i+BATCH_RECEIPT_SIZE]
-            receipts_map.update(batch_fetch_receipts(batch))
-            pb_rc.update(len(batch))
-        pb_rc.close()
+        # Progress for receipts
+        swap_txs = sorted(set([r.transactionHash for r in buf_rows if r.eventType.startswith("swap")]))
+        receipts_map: Dict[str, Any] = {}
+        if swap_txs:
+            pb_rc = TQDM(total=len(swap_txs), desc="Receipts")
+            for i in range(0, len(swap_txs), BATCH_RECEIPT_SIZE):
+                batch = swap_txs[i:i+BATCH_RECEIPT_SIZE]
+                receipts_map.update(batch_fetch_receipts(batch))
+                pb_rc.update(len(batch))
+            pb_rc.close()
 
-    enrich_swaps_with_liquidity(buf_rows, receipts_map)
+        enrich_swaps_with_liquidity(buf_rows, receipts_map)
 
-    if not SKIP_GAS_DATA:
-        txs_all = sorted(set([r.transactionHash for r in buf_rows]))
-        if txs_all:
-            pb_g = TQDM(total=len(txs_all), desc="Gas meta")
-            for i in range(0, len(txs_all), BATCH_RECEIPT_SIZE):
-                batch = txs_all[i:i+BATCH_RECEIPT_SIZE]
-                missing = [h for h in batch if h not in receipts_map]
-                if missing:
-                    receipts_map.update(batch_fetch_receipts(missing))
-                pb_g.update(len(batch))
-            pb_g.close()
-        enrich_with_gas(buf_rows, receipts_map)
+        if not SKIP_GAS_DATA:
+            txs_all = sorted(set([r.transactionHash for r in buf_rows]))
+            if txs_all:
+                pb_g = TQDM(total=len(txs_all), desc="Gas meta")
+                for i in range(0, len(txs_all), BATCH_RECEIPT_SIZE):
+                    batch = txs_all[i:i+BATCH_RECEIPT_SIZE]
+                    missing = [h for h in batch if h not in receipts_map]
+                    if missing:
+                        receipts_map.update(batch_fetch_receipts(missing))
+                    pb_g.update(len(batch))
+                pb_g.close()
+            enrich_with_gas(buf_rows, receipts_map)
 
-    buf_rows.sort(key=lambda r: (r.blockNumber, r.logIndex))
+        buf_rows.sort(key=lambda r: (r.blockNumber, r.logIndex))
 
-    for r in buf_rows:
-        r.L_before = int(cur_L)
-        r.sqrt_before = int(cur_sqrt)
-        r.tick_before = int(cur_tick)
-        r.x_before = virt_x(r.L_before, r.sqrt_before)
-        r.y_before = virt_y(r.L_before, r.sqrt_before)
+        for r in buf_rows:
+            r.L_before = int(cur_L)
+            r.sqrt_before = int(cur_sqrt)
+            r.tick_before = int(cur_tick)
+            r.x_before = virt_x(r.L_before, r.sqrt_before)
+            r.y_before = virt_y(r.L_before, r.sqrt_before)
 
-        if r.eventType in ("Mint", "Burn"):
-            hit = (r.tickLower <= r.tick_before < r.tickUpper)
-            r.affectsActive = bool(hit)
-            applied = int(r.liquidityDelta) if hit else 0
-            r.deltaL_applied = applied
-            cur_L = int(cur_L) + applied
-        else:
-            if r.liquidityAfter_event is not None:
-                cur_L = int(r.liquidityAfter_event)
-            cur_sqrt = int(r.sqrtPriceX96_event) if r.sqrtPriceX96_event is not None else cur_sqrt
-            cur_tick = int(r.tick_event) if r.tick_event is not None else cur_tick
+            if r.eventType in ("Mint", "Burn"):
+                hit = (r.tickLower <= r.tick_before < r.tickUpper)
+                r.affectsActive = bool(hit)
+                applied = int(r.liquidityDelta) if hit else 0
+                r.deltaL_applied = applied
+                cur_L = int(cur_L) + applied
+            else:
+                if r.liquidityAfter_event is not None:
+                    cur_L = int(r.liquidityAfter_event)
+                cur_sqrt = int(r.sqrtPriceX96_event) if r.sqrtPriceX96_event is not None else cur_sqrt
+                cur_tick = int(r.tick_event) if r.tick_event is not None else cur_tick
 
-        r.L_after = int(cur_L)
-        r.sqrt_after = int(cur_sqrt)
-        r.tick_after = int(cur_tick)
-        r.x_after = virt_x(r.L_after, r.sqrt_after)
-        r.y_after = virt_y(r.L_after, r.sqrt_after)
-        sqrt_for_price = r.sqrtPriceX96_event or r.sqrt_after or r.sqrt_before
-        r.price = compute_price_value(sqrt_for_price, ckpt.get("token0_decimals"), ckpt.get("token1_decimals"))
+            r.L_after = int(cur_L)
+            r.sqrt_after = int(cur_sqrt)
+            r.tick_after = int(cur_tick)
+            r.x_after = virt_x(r.L_after, r.sqrt_after)
+            r.y_after = virt_y(r.L_after, r.sqrt_after)
+            sqrt_for_price = r.sqrtPriceX96_event or r.sqrt_after or r.sqrt_before
+            r.price = compute_price_value(sqrt_for_price, ckpt.get("token0_decimals"), ckpt.get("token1_decimals"))
 
-    df = pd.DataFrame([r.__dict__ for r in buf_rows])
+        df = pd.DataFrame([r.__dict__ for r in buf_rows])
 
-    fb = int(chunk_first_block) if chunk_first_block is not None else int(df["blockNumber"].min())
-    lb = int(chunk_last_block) if chunk_last_block is not None else int(df["blockNumber"].max())
-    last_window_block = max(last_window_block or lb, lb)
+        fb = int(chunk_first_block) if chunk_first_block is not None else int(df["blockNumber"].min())
+        lb = int(chunk_last_block) if chunk_last_block is not None else int(df["blockNumber"].max())
+        last_window_block = max(last_window_block or lb, lb)
 
-    path = pickle_write_chunk(df, OUT_DIR, fb, lb)
-    events_total += len(df)
+        path = pickle_write_chunk(df, OUT_DIR, fb, lb)
+        events_total += len(df)
 
-    ckpt.update({
-        "cur_L": int(cur_L), "cur_sqrt": int(cur_sqrt), "cur_tick": int(cur_tick),
-        "events_written": int(events_total),
-        "last_window_block": int(last_window_block),
-        "out_pickle_dir": OUT_DIR,
-    })
-    save_checkpoint(CHECKPOINT_PATH, ckpt)
+        ckpt.update({
+            "cur_L": int(cur_L), "cur_sqrt": int(cur_sqrt), "cur_tick": int(cur_tick),
+            "events_written": int(events_total),
+            "last_window_block": int(last_window_block),
+            "out_pickle_dir": OUT_DIR,
+        })
+        save_checkpoint(CHECKPOINT_PATH, ckpt)
 
-    print(f"  ✓ Wrote {len(df):,} rows | Last event block: {lb} | Chunk: {path}")
+        print(f"  ✓ Wrote {len(df):,} rows | Last event block: {lb} | Chunk: {path}")
 
         buf_rows = []
         chunk_first_block = None
@@ -888,50 +888,50 @@ def run_harvester():
 
     for etype, ev in stream_iter:
         bn = int(ev["transaction"]["blockNumber"])
-    ts = int(ev["timestamp"])
-    txh = ev["transaction"]["id"]
+        ts = int(ev["timestamp"])
+        txh = ev["transaction"]["id"]
 
-    if first_window_block is None:
-        first_window_block = bn
-        ckpt["first_window_block"] = first_window_block
-    last_window_block = bn
+        if first_window_block is None:
+            first_window_block = bn
+            ckpt["first_window_block"] = first_window_block
+        last_window_block = bn
 
-    if chunk_first_block is None:
-        chunk_first_block = bn
-    chunk_last_block = bn
+        if chunk_first_block is None:
+            chunk_first_block = bn
+        chunk_last_block = bn
 
-    if etype == "swap":
-        amt0_dec = Decimal(ev["amount0"])
-        direction = "swap_y2x" if amt0_dec < 0 else "swap_x2y"
-        row = EventRow(
-            eventType=direction, blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
-            origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
-            baseFeePerGas=None, priorityFeePerGas=None,
-            sender=ev.get("sender"), owner=None, recipient=ev.get("recipient"),
-            amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
-            sqrtPriceX96_event=int(ev["sqrtPriceX96"]), tick_event=int(ev["tick"]), liquidityAfter_event=None,
-            tickLower=None, tickUpper=None, liquidityDelta=None
-        )
-    elif etype == "mint":
-        row = EventRow(
-            eventType="Mint", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
-            origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
-            baseFeePerGas=None, priorityFeePerGas=None,
-            sender=ev.get("sender"), owner=ev.get("owner"), recipient=None,
-            amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
-            sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,
-            tickLower=int(ev["tickLower"]), tickUpper=int(ev["tickUpper"]), liquidityDelta=int(ev["amount"])
-        )
-    else:  # burn
-        row = EventRow(
-            eventType="Burn", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
-            origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
-            baseFeePerGas=None, priorityFeePerGas=None,
-            sender=None, owner=ev.get("owner"), recipient=None,
-            amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
-            sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,
-            tickLower=int(ev["tickLower"]), tickUpper=int(ev["tickUpper"]), liquidityDelta=-int(ev["amount"])
-        )
+        if etype == "swap":
+            amt0_dec = Decimal(ev["amount0"])
+            direction = "swap_y2x" if amt0_dec < 0 else "swap_x2y"
+            row = EventRow(
+                eventType=direction, blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
+                origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+                baseFeePerGas=None, priorityFeePerGas=None,
+                sender=ev.get("sender"), owner=None, recipient=ev.get("recipient"),
+                amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
+                sqrtPriceX96_event=int(ev["sqrtPriceX96"]), tick_event=int(ev["tick"]), liquidityAfter_event=None,
+                tickLower=None, tickUpper=None, liquidityDelta=None
+            )
+        elif etype == "mint":
+            row = EventRow(
+                eventType="Mint", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
+                origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+                baseFeePerGas=None, priorityFeePerGas=None,
+                sender=ev.get("sender"), owner=ev.get("owner"), recipient=None,
+                amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
+                sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,
+                tickLower=int(ev["tickLower"]), tickUpper=int(ev["tickUpper"]), liquidityDelta=int(ev["amount"])
+            )
+        else:  # burn
+            row = EventRow(
+                eventType="Burn", blockNumber=bn, logIndex=int(ev["logIndex"] or 0), timestamp=ts, transactionHash=txh,
+                origin=ev.get("origin"), gasUsed=None, gasPrice=None, effectiveGasPrice=None,
+                baseFeePerGas=None, priorityFeePerGas=None,
+                sender=None, owner=ev.get("owner"), recipient=None,
+                amount0=str(ev["amount0"]), amount1=str(ev["amount1"]),
+                sqrtPriceX96_event=None, tick_event=None, liquidityAfter_event=None,
+                tickLower=int(ev["tickLower"]), tickUpper=int(ev["tickUpper"]), liquidityDelta=-int(ev["amount"])
+            )
 
         buf_rows.append(row)
         pb_events.update(1)
