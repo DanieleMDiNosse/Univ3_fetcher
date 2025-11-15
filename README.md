@@ -1,9 +1,5 @@
 # Uniswap v3 Data Downloader
 
-Streamlit command center plus CLI helpers to collect Uniswap v3 swaps/mints/burns and turn them into ready-to-share liquidity insights.
-
-![Streamlit control panel](docs/assets/streamlit_ui.png)
-
 ![Liquidity profile animation](docs/assets/liquidity_profile.gif)
 
 ## Highlights
