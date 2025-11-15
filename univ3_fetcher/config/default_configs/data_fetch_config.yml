@@ -1,6 +1,3 @@
-json_rpc_urls:
-  - https://eth.llamarpc.com/sk_llama_252714c1e64c9873e3b21ff94d7f1a3f
-  - https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588
 pool_addr: 0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640
 start_ts: 2023-01-01T00:00:00Z
 end_ts: 2023-01-01T11:59:59Z
@@ -12,7 +9,6 @@ out_dir: data/univ3_{pool}
 skip_gas_data: true
 compute_price_column: true
 
-graph_url: https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV
 subgraph_page_size: 1000         # <= 1000
 chunk_events: 10000               # flush frequency
 batch_receipt_size: 100

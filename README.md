@@ -1,9 +1,42 @@
 # Uniswap v3 Data Downloader
 
-## Summary
-- **What it does:** Streamlit workspace and CLI utilities for harvesting Uniswap v3 swap/mint/burn events, enriched pool state, and liquidity snapshots on Ethereum mainnet.
-- **How it works:** The UI assembles a YAML config and hands it to a subgraph-first collector (`data_fetch_subgraph.py`) that streams events from The Graph, enriches every row with before/after AMM state, resumes via checkpoints, and falls back to targeted RPC calls for receipts or missing liquidity data.
-- **How to use it:** Launch `streamlit_app.py` for a guided run or call the CLI scripts with your own configs; each execution writes configs, logs, raw chunks, merged pickles, and metadata into timestamped folders under `downloads/`.
+Streamlit command center plus CLI helpers to collect Uniswap v3 swaps/mints/burns and turn them into ready-to-share liquidity insights.
+
+![Streamlit control panel](docs/assets/streamlit_ui.png)
+
+![Liquidity profile animation](docs/assets/liquidity_profile.gif)
+
+## Highlights
+- **Guided runs:** Streamlit UI wires up configs for you (subgraph URL, multi-RPC list, pool preset/custom address, time window, column selection, destination folder).
+- **Resilient harvesting:** Subgraph-first collector chunks, checkpoints, enriches with pool state/price, and only hits RPC when it must (receipts, fallback liquidity, optional gas stats).
+- **Liquidity profiles:** Event-aware snapshotter captures historical ticks, builds big-int-safe profiles, and exports GIFs so you can eyeball liquidity shifts in seconds.
+- **Neat artifacts:** Every run bundles configs, logs, raw chunks, merged pickles, manifests, and GIFs under a slugged folder so experiments stay reproducible.
+
+## Quick start
+
+1. **Streamlit data fetcher**
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+   - Enter your Uniswap v3 subgraph endpoint plus one or more HTTPS JSON-RPC URLs.
+   - Pick a pool (preset or custom address), choose the UTC window, and select the columns you need (gas columns toggle receipt lookups).
+   - Hit “Start download” to stream logs and collect artifacts under `downloads/<pool+window_slug>/`.
+
+2. **Liquidity profile animator**
+   ```bash
+   python -m univ3_fetcher.core.liquidity.animator
+   # or python scripts/liquidity_animator.py
+   ```
+   - Edit `univ3_fetcher/config/default_configs/liquidity_config.yml` (or set `LIQUIDITY_CONFIG_PATH`) with your pool, time range, sampling cadence, and endpoints.
+   - The script resolves blocks, fetches tick snapshots, then renders an animated GIF under `runs/pool_<addr_prefix>/`.
+
+## Prerequisites & expectations
+- Python **3.11** (the `eth_defi` dependency is 3.11-only today). Use `venv`, Conda, or pyenv to pin it.
+- Bring your own **Uniswap v3 subgraph URL** (hosted service or Gateway) and **HTTPS JSON-RPC endpoints** (multiple URLs = better resiliency).
+- Ethereum **mainnet only** right now.
+- Runtime guidance: a single-day window with swaps-only columns typically finishes in 5–10 minutes; selecting gas metadata or multi-month windows can stretch to an hour+. Liquidity GIFs reuse cached manifests/tick files after the first run, but the first full build may take several minutes depending on snapshot count.
+
+---
 
 ## Features
 - Streamlit configurator covering subgraph endpoint, multiple HTTPS RPC URLs, pool presets/custom pools, time windows, destination paths, and advanced performance knobs.
@@ -103,7 +136,7 @@ python liquidity.py
 ## Tips
 - RPC nodes may rate limit large requests. Supplying multiple URLs and modest chunk sizes improves reliability.
 - Balance `subgraph_page_size` and `chunk_events` to fit your memory budget while keeping API calls efficient.
-- Gas columns (`gasUsed`, `gasPrice`, `effectiveGasPrice`) require transaction receipts, which significantly increase runtime—only enable them when needed.
+- Gas columns (`gasUsed`, `gasPrice`, `effectiveGasPrice`) require transaction receipts, which significantly i ncrease runtime—only enable them when needed.
 - Re-run failed harvests with the same config to resume from the latest checkpoint instead of starting over.
 - The combined pickle saved under `data/<pool>.pkl` (if present) is reused to speed up repeated runs; clear it if you want a fresh aggregation.
 - For the liquidity animator, start with a narrower time range to validate your config before rendering long animations.

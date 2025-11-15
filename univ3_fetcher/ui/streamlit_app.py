@@ -23,11 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "data_fetch_config.yml"
 
 DEFAULTS: Dict[str, object] = {
-    "graph_url": "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
-    "json_rpc_urls": [
-        "https://eth.llamarpc.com/sk_llama_252714c1e64c9873e3b21ff94d7f1a3f",
-        "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588",
-    ],
+    "graph_url": "",
+    "json_rpc_urls": [],
     "pool_addr": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
     "start_ts": "2023-01-01T00:00:00Z",
     "end_ts": "2023-01-02T00:00:00Z",
@@ -603,14 +600,14 @@ def render_data_fetcher_tab():
     ):
         rpc_text = st.text_area(
             "JSON-RPC endpoints",
-            value="\n".join(DEFAULTS["json_rpc_urls"]),
+            value="",
             height=100,
             help="Combine multiple HTTPS RPC URLs for resiliency — failures are retried across providers.",
         )
         
         graph_url = st.text_input(
             "Subgraph endpoint",
-            value=str(DEFAULTS.get("graph_url", "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3")),
+            value="",
             placeholder="https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
             help="TheGraph subgraph URL for fetching Uniswap v3 events.",
         )
@@ -887,12 +884,12 @@ def render_liquidity_tab():
         if use_subgraph_flag:
             graph_url = st.text_input(
                 "Subgraph endpoint",
-                value=str(DEFAULTS.get("graph_url", "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV")),
+                value="",
                 key="liq_subgraph",
             )
             rpc_text = st.text_input(
                 "Ethereum RPC URL",
-                value=str(DEFAULTS.get("json_rpc_urls", ["https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"])[0] if isinstance(DEFAULTS.get("json_rpc_urls"), list) else "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"),
+                value="",
                 key="liq_rpc",
                 help="RPC URL for block timestamp resolution",
             )

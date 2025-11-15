@@ -1,7 +1,5 @@
 pool_id: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
 use_subgraph: true
-subgraph: https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV
-eth_rpc_url: https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588
 start_ts: 2023-01-01T00:00:00Z
 end_ts: 2023-04-01T00:00:00Z
 step_seconds: 900

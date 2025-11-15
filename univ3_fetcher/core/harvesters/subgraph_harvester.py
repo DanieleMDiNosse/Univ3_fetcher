@@ -345,7 +345,6 @@ def safe_get_receipt(tx_hash: str, retries: int = 3, delay: float = 0.5):
             time.sleep(delay * (k+1))
         except Exception:
             time.sleep(delay * (k+1))
-    return None
 
 def batch_fetch_receipts(tx_hashes: Sequence[str]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -425,9 +424,7 @@ def enrich_swaps_with_liquidity(rows: List[EventRow], receipts_cache: Dict[str, 
             pass
 
 def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> None:
-    print(f"[gas-meta] starting enrichment pass for {len(rows)} events") # remove this after the check
     block_base_fee_cache: Dict[int, Optional[int]] = {}
-    processed_events = 0 # remove this after the check
     for r in rows:
         rc = receipts_cache.get(r.transactionHash)
         if not rc:
@@ -466,10 +463,7 @@ def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> Non
                     base_fee_val = int(base_fee_raw) if base_fee_raw is not None else None
                 except Exception:
                     base_fee_val = None
-                    print(f"[gas-meta] failed to fetch base fee for block {block_number}") # remove this after the check
                 block_base_fee_cache[block_number] = base_fee_val
-                if base_fee_val is not None and (len(block_base_fee_cache) % 50 == 0): # remove this after the check
-                    print(f"[gas-meta] fetched base fee for {len(block_base_fee_cache)} unique blocks (latest={block_number})") # remove this after the check
 
         r.baseFeePerGas = base_fee_val
 
@@ -499,10 +493,6 @@ def enrich_with_gas(rows: List[EventRow], receipts_cache: Dict[str, Any]) -> Non
                 priority_fee_val = None
 
         r.priorityFeePerGas = priority_fee_val
-        processed_events += 1
-        if processed_events % 250 == 0:
-            print(f"[gas-meta] processed {processed_events} events so far")
-    print(f"[gas-meta] enrichment pass complete — processed {processed_events} events, cached {len(block_base_fee_cache)} blocks")
 
 
 # ---------------- Utility ----------------

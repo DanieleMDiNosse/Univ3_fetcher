@@ -23,11 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "data_fetch_config.yml"
 
 DEFAULTS: Dict[str, object] = {
-    "graph_url": "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
-    "json_rpc_urls": [
-        "https://eth.llamarpc.com/sk_llama_252714c1e64c9873e3b21ff94d7f1a3f",
-        "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588",
-    ],
+    "graph_url": "",
+    "json_rpc_urls": [],
     "pool_addr": "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
     "start_ts": "2023-01-01T00:00:00Z",
     "end_ts": "2023-01-02T00:00:00Z",
@@ -146,6 +143,9 @@ DEFAULT_COLUMN_SELECTION: Sequence[str] = [
 GAS_COLUMNS = {"gasUsed", "gasPrice", "effectiveGasPrice", "baseFeePerGas", "priorityFeePerGas"}
 
 LOG_STATE_KEY = "last_run_log_text"
+DATASET_PREVIEW_KEY = "last_run_dataset_preview"
+DATASET_METADATA_KEY = "last_run_metadata"
+RUN_COMPLETED_KEY = "run_completed"
 
 
 def write_config_file(run_dir: Path, config_payload: Dict[str, object]) -> Path:
@@ -212,14 +212,17 @@ def execute_fetch(
                     last_pct = max(0.0, min(100.0, pct))
                     progress_bar.progress(int(last_pct))
     return_code = process.wait()
+    # Append status message to log output instead of replacing it
     if return_code != 0:
-        log_placeholder.error("data_fetch_subgraph.py failed — check log output above.")
+        lines.append("\n❌ data_fetch_subgraph.py failed — check log output above.")
         if progress_bar is not None:
             progress_bar.progress(int(last_pct))
     else:
-        log_placeholder.success("data_fetch_subgraph.py finished successfully.")
+        lines.append("\n✅ data_fetch_subgraph.py finished successfully.")
         if progress_bar is not None:
             progress_bar.progress(100)
+    # Update log output with final status included
+    update_log_output(log_placeholder, lines)
     return return_code == 0, log_path
 
 
@@ -603,14 +606,14 @@ def render_data_fetcher_tab():
     ):
         rpc_text = st.text_area(
             "JSON-RPC endpoints",
-            value="\n".join(DEFAULTS["json_rpc_urls"]),
+            value="",
             height=100,
             help="Combine multiple HTTPS RPC URLs for resiliency — failures are retried across providers.",
         )
         
         graph_url = st.text_input(
             "Subgraph endpoint",
-            value=str(DEFAULTS.get("graph_url", "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3")),
+            value="",
             placeholder="https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
             help="TheGraph subgraph URL for fetching Uniswap v3 events.",
         )
@@ -684,10 +687,38 @@ def render_data_fetcher_tab():
     ):
         run_button = st.button("Start download", type="primary", use_container_width=True)
 
+    # Display previous results if they exist and button wasn't clicked
     if not run_button:
+        if st.session_state.get(RUN_COMPLETED_KEY, False):
+            # Show previous log output
+            prev_log = st.session_state.get(LOG_STATE_KEY, "")
+            if prev_log:
+                st.markdown("#### Previous run log output")
+                log_container = st.container()
+                render_log_output(log_container, prev_log)
+            
+            # Show previous dataset preview
+            prev_preview = st.session_state.get(DATASET_PREVIEW_KEY)
+            prev_metadata = st.session_state.get(DATASET_METADATA_KEY, {})
+            if prev_preview is not None and not prev_preview.empty:
+                st.markdown("#### Downloaded dataset preview")
+                st.dataframe(
+                    prev_preview,
+                    use_container_width=True,
+                    height=min(520, 90 + len(prev_preview) * 26),
+                )
+                total_rows = prev_metadata.get("total_rows", len(prev_preview))
+                shown_rows = len(prev_preview)
+                st.caption(f"Showing first {shown_rows:,} of {total_rows:,} rows.")
+                if prev_metadata.get("output_folder"):
+                    st.info(f"Results saved to: {prev_metadata.get('output_folder')}")
         return
 
+    # Clear previous results when starting a new run
     st.session_state[LOG_STATE_KEY] = ""
+    st.session_state[DATASET_PREVIEW_KEY] = None
+    st.session_state[DATASET_METADATA_KEY] = {}
+    st.session_state[RUN_COMPLETED_KEY] = False
 
     rpc_urls = [url.strip() for url in rpc_text.splitlines() if url.strip()]
     errors: List[str] = []
@@ -754,9 +785,14 @@ def render_data_fetcher_tab():
         progress_bar = st.progress(0)
         success, log_path = execute_fetch(log_placeholder, config_path, {}, progress_bar=progress_bar)
 
-    render_log_output(log_placeholder, st.session_state.get(LOG_STATE_KEY, ""))
+    # Ensure log output is displayed (it should already be updated by execute_fetch, but restore from session state as backup)
+    final_log_text = st.session_state.get(LOG_STATE_KEY, "")
+    if final_log_text:
+        render_log_output(log_placeholder, final_log_text)
 
     if not success:
+        # Mark as completed (even though failed) so log output persists
+        st.session_state[RUN_COMPLETED_KEY] = True
         st.error("Run aborted because data_fetch_subgraph.py exited with an error.")
         return
 
@@ -799,6 +835,17 @@ def render_data_fetcher_tab():
             preview_df = prepare_preview_dataframe(combined_df)
             shown_rows = len(preview_df)
             total_rows = len(combined_df)
+            
+            # Store preview and metadata in session state for persistence
+            st.session_state[DATASET_PREVIEW_KEY] = preview_df
+            st.session_state[DATASET_METADATA_KEY] = {
+                "total_rows": total_rows,
+                "shown_rows": shown_rows,
+                "output_folder": str(final_run_dir),
+                "pool_label": pool_display or preset_choice,
+            }
+            st.session_state[RUN_COMPLETED_KEY] = True
+            
             st.markdown("#### Downloaded dataset preview")
             st.dataframe(
                 preview_df,
@@ -887,12 +934,12 @@ def render_liquidity_tab():
         if use_subgraph_flag:
             graph_url = st.text_input(
                 "Subgraph endpoint",
-                value=str(DEFAULTS.get("graph_url", "https://gateway.thegraph.com/api/42e297632dfbe248cf6ac11ded17e89f/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV")),
+                value="",
                 key="liq_subgraph",
             )
             rpc_text = st.text_input(
                 "Ethereum RPC URL",
-                value=str(DEFAULTS.get("json_rpc_urls", ["https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"])[0] if isinstance(DEFAULTS.get("json_rpc_urls"), list) else "https://mainnet.infura.io/v3/5f38fb376e0548c8a828112252a6a588"),
+                value="",
                 key="liq_rpc",
                 help="RPC URL for block timestamp resolution",
             )

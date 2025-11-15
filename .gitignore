@@ -216,3 +216,7 @@ __marimo__/
 
 # notebooks
 *.ipynb
+
+# personal configs
+personal_conf_liquidity.yml
+personal_conf_data.yml

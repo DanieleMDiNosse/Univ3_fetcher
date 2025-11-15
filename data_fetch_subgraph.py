@@ -38,20 +38,49 @@ from decimal import Decimal
 
 from utils import sqrtPriceX96_to_price
 
-# ---------- Optional progress bar ----------
-try:
-    from tqdm import tqdm as _tqdm
-    def TQDM(total=None, desc=""):
-        return _tqdm(total=total, desc=desc, dynamic_ncols=True, leave=False)
-    TQDM_AVAILABLE = True
-except Exception:
-    TQDM_AVAILABLE = False
-    class DummyPB:
-        def __init__(self, total=None, desc=""): self.n=0
-        def update(self, k=1): self.n+=k
-        def set_postfix(self, **k): pass
-        def close(self): pass
-    def TQDM(total=None, desc=""): return DummyPB()
+# ---------- Clean progress reporter (replaces verbose tqdm) ----------
+class ProgressReporter:
+    """Simple progress reporter that only prints periodic updates."""
+    def __init__(self, total=None, desc="", update_interval=1000):
+        self.total = total
+        self.desc = desc
+        self.current = 0
+        self.update_interval = update_interval
+        self.last_update = 0
+        self.start_time = time.time()
+    
+    def update(self, n=1):
+        self.current += n
+        # Only print updates at intervals
+        if self.current - self.last_update >= self.update_interval:
+            self._print_update()
+            self.last_update = self.current
+    
+    def _print_update(self):
+        elapsed = time.time() - self.start_time
+        rate = self.current / elapsed if elapsed > 0 else 0
+        if self.total:
+            pct = (self.current / self.total) * 100
+            print(f"  {self.desc}: {self.current:,}/{self.total:,} ({pct:.1f}%) | {rate:.1f}/s", flush=True)
+        else:
+            print(f"  {self.desc}: {self.current:,} | {rate:.1f}/s", flush=True)
+    
+    def set_postfix(self, **kwargs):
+        # Store postfix info but don't print it every time
+        self.postfix = kwargs
+    
+    def close(self):
+        # Print final status
+        elapsed = time.time() - self.start_time
+        rate = self.current / elapsed if elapsed > 0 else 0
+        if self.total:
+            print(f"  {self.desc}: {self.current:,}/{self.total:,} (100%) | {rate:.1f}/s", flush=True)
+        else:
+            print(f"  {self.desc}: {self.current:,} | {rate:.1f}/s", flush=True)
+
+def TQDM(total=None, desc="", update_interval=1000):
+    """Create a clean progress reporter instead of verbose tqdm."""
+    return ProgressReporter(total=total, desc=desc, update_interval=update_interval)
 
 # ---------------- Configuration ----------------
 
@@ -657,9 +686,9 @@ def pickle_write_chunk(df: pd.DataFrame, root_dir: str, first_block: int, last_b
 
 # ---------------- Driver ----------------
 
-print(f"Starting (subgraph-first) data fetch for pool {POOL_ADDR}")
-print(f"Date range: {pd.to_datetime(START_TS, unit='s')} to {pd.to_datetime(END_TS, unit='s')}")
-print(f"Settings: PAGE_SIZE={PAGE_SIZE}, CHUNK_EVENTS={CHUNK_EVENTS}, SKIP_GAS={SKIP_GAS_DATA}")
+print(f"\n📊 Fetching data for pool {POOL_ADDR}")
+print(f"   Time range: {pd.to_datetime(START_TS, unit='s')} to {pd.to_datetime(END_TS, unit='s')}")
+print(f"   Config: page_size={PAGE_SIZE}, chunk_size={CHUNK_EVENTS}, skip_gas={SKIP_GAS_DATA}\n")
 
 ckpt = load_checkpoint(CHECKPOINT_PATH)
 
@@ -779,7 +808,7 @@ events_total = int(ckpt.get("events_written", 0))
 chunk_first_block: Optional[int] = None
 chunk_last_block: Optional[int] = None
 
-pb_events = TQDM(total=None, desc="Events")
+pb_events = TQDM(total=None, desc="Processing events", update_interval=1000)
 
 def flush_chunk():
     global buf_rows, cur_L, cur_sqrt, cur_tick, events_total, chunk_first_block, chunk_last_block, last_window_block
@@ -791,7 +820,7 @@ def flush_chunk():
     swap_txs = sorted(set([r.transactionHash for r in buf_rows if r.eventType.startswith("swap")]))
     receipts_map: Dict[str, Any] = {}
     if swap_txs:
-        pb_rc = TQDM(total=len(swap_txs), desc="Receipts")
+        pb_rc = TQDM(total=len(swap_txs), desc="Fetching receipts", update_interval=max(100, len(swap_txs)//20))
         for i in range(0, len(swap_txs), BATCH_RECEIPT_SIZE):
             batch = swap_txs[i:i+BATCH_RECEIPT_SIZE]
             receipts_map.update(batch_fetch_receipts(batch))
@@ -803,7 +832,7 @@ def flush_chunk():
     if not SKIP_GAS_DATA:
         txs_all = sorted(set([r.transactionHash for r in buf_rows]))
         if txs_all:
-            pb_g = TQDM(total=len(txs_all), desc="Gas meta")
+            pb_g = TQDM(total=len(txs_all), desc="Fetching gas metadata", update_interval=max(100, len(txs_all)//20))
             for i in range(0, len(txs_all), BATCH_RECEIPT_SIZE):
                 batch = txs_all[i:i+BATCH_RECEIPT_SIZE]
                 missing = [h for h in batch if h not in receipts_map]
@@ -859,14 +888,14 @@ def flush_chunk():
     })
     save_checkpoint(CHECKPOINT_PATH, ckpt)
 
-    print(f"  ✓ Wrote {len(df):,} rows | Last event block: {lb} | Chunk: {path}")
+    print(f"  ✓ Saved chunk: {len(df):,} rows (blocks {fb:,} to {lb:,})")
 
     buf_rows = []
     chunk_first_block = None
     chunk_last_block = None
 
 
-print("Streaming events from subgraph…")
+print("📥 Fetching events from subgraph...")
 stream_iter = merged_stream_with_cursors(POOL_ADDR, START_TS, END_TS, cur_swap, cur_mint, cur_burn)
 
 for etype, ev in stream_iter:
@@ -919,7 +948,6 @@ for etype, ev in stream_iter:
     buf_rows.append(row)
     pb_events.update(1)
     if len(buf_rows) >= CHUNK_EVENTS:
-        pb_events.set_postfix(block=bn, events=events_total + len(buf_rows))
         flush_chunk()
 
 # Final flush
@@ -933,7 +961,7 @@ chunk_paths = sorted(
 )
 
 if chunk_paths:
-    print("\n🔗 Merging chunk files into consolidated pickle…")
+    print("\n🔗 Merging chunks into consolidated dataset...")
     total_rows = 0
     combined_df: Optional[pd.DataFrame] = None
     for chunk_path in chunk_paths:
@@ -958,17 +986,16 @@ if chunk_paths:
     merged_dir.mkdir(parents=True, exist_ok=True)
     merged_path = merged_dir / f"{POOL_ADDR}.pkl"
     combined_df.to_pickle(merged_path, compression=None, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"  ✓ Combined {total_rows:,} rows → {merged_path}")
+    print(f"  ✓ Merged {total_rows:,} rows → {merged_path}")
 else:
-    print("\n⚠️  No chunk files found to merge into a consolidated pickle.")
+    print("\n⚠️  No chunk files found to merge.")
 
 elapsed_total = time.time() - start_t
 print(f"\n{'='*60}")
-print("✅ COMPLETED!")
-print(f"Time range: {pd.to_datetime(START_TS, unit='s')} to {pd.to_datetime(END_TS, unit='s')}")
-print(f"Total events written: {ckpt.get('events_written', 0):,}")
-print(f"Output directory: {OUT_DIR}")
+print("✅ COMPLETED")
+print(f"  Events: {ckpt.get('events_written', 0):,}")
 if first_window_block is not None and last_window_block is not None:
-    print(f"Block range (observed): {first_window_block} to {last_window_block}")
-print(f"Total time: {str(_dt.timedelta(seconds=int(elapsed_total)))}")
+    print(f"  Blocks: {first_window_block:,} to {last_window_block:,}")
+print(f"  Duration: {str(_dt.timedelta(seconds=int(elapsed_total)))}")
+print(f"  Output: {OUT_DIR}")
 print(f"{'='*60}")
